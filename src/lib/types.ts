@@ -10,6 +10,8 @@ export type ConcreteCloudType = Exclude<CloudType, 'auto'>;
 
 export type SurfaceMode = 'light' | 'dark';
 
+export type ThemePreference = 'auto' | SurfaceMode;
+
 export type RainMode = 'auto' | 'on' | 'off';
 
 export interface CloudParams {

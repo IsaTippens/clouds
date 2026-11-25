@@ -4,7 +4,7 @@
 	import CloudViewport from '$lib/components/CloudViewport.svelte';
 	import HudOverlay from '$lib/components/HudOverlay.svelte';
 	import Sidebar from '$lib/components/Sidebar.svelte';
-	import { appState } from '$lib/state.svelte';
+	import { appState, initThemePreference } from '$lib/state.svelte';
 
 	let viewportRef: CloudViewport | undefined = $state();
 
@@ -13,6 +13,7 @@
 		if (window.innerWidth < 820) {
 			appState.menuOpen = false;
 		}
+		return initThemePreference();
 	});
 
 	function handleKeydown(event: KeyboardEvent) {

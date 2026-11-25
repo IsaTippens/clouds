@@ -4,9 +4,10 @@
 		applyPreset,
 		PRESETS,
 		randomizeLocation,
-		resetParams
+		resetParams,
+		setThemePreference
 	} from '$lib/state.svelte';
-	import type { CloudType, RainMode, SurfaceMode } from '$lib/types';
+	import type { CloudType, RainMode, ThemePreference } from '$lib/types';
 	import StencilSlider from './StencilSlider.svelte';
 
 	const CLOUD_TYPES: { id: CloudType; label: string; code: string }[] = [
@@ -52,8 +53,8 @@
 		markCustom();
 	}
 
-	function setSurfaceMode(mode: SurfaceMode) {
-		appState.params.surfaceMode = mode;
+	function setSurfaceMode(mode: ThemePreference) {
+		setThemePreference(mode);
 	}
 
 	function setRainMode(mode: RainMode) {
@@ -559,22 +560,30 @@
 					/>
 
 					<div class="sub-label">MONOCHROME SURFACE</div>
-					<div class="segmented">
+					<div class="segmented segmented-3" role="group" aria-label="Monochrome theme preference">
 						<button
 							type="button"
 							class="stencil-btn seg-btn"
-							class:is-active={appState.params.surfaceMode === 'light'}
-							onclick={() => setSurfaceMode('light')}
+							class:is-active={appState.themePreference === 'auto'}
+							onclick={() => setSurfaceMode('auto')}
 						>
-							LIGHT PAPER
+							AUTO
 						</button>
 						<button
 							type="button"
 							class="stencil-btn seg-btn"
-							class:is-active={appState.params.surfaceMode === 'dark'}
+							class:is-active={appState.themePreference === 'light'}
+							onclick={() => setSurfaceMode('light')}
+						>
+							LIGHT
+						</button>
+						<button
+							type="button"
+							class="stencil-btn seg-btn"
+							class:is-active={appState.themePreference === 'dark'}
 							onclick={() => setSurfaceMode('dark')}
 						>
-							DARK INK
+							DARK
 						</button>
 					</div>
 

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { CameraPreset } from '$lib/cloud';
-	import { appState } from '$lib/state.svelte';
+	import { appState, cycleThemePreference } from '$lib/state.svelte';
 	import type { ConcreteCloudType } from '$lib/types';
 
 	interface Props {
@@ -39,8 +39,19 @@
 	}
 
 	function toggleSurface() {
-		appState.params.surfaceMode = appState.params.surfaceMode === 'light' ? 'dark' : 'light';
+		cycleThemePreference();
 	}
+
+	let surfaceLabelDesktop = $derived.by(() => {
+		const icon = appState.params.surfaceMode === 'light' ? '◐' : '◑';
+		if (appState.themePreference === 'auto') return `${icon} AUTO`;
+		return appState.themePreference === 'light' ? '◐ LIGHT' : '◑ DARK';
+	});
+
+	let surfaceLabelMobile = $derived.by(() => {
+		if (appState.themePreference === 'auto') return 'A';
+		return appState.params.surfaceMode === 'light' ? '◐' : '◑';
+	});
 
 	function formatCompactPoints(n: number): string {
 		if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
@@ -89,11 +100,11 @@
 			type="button"
 			class="stencil-btn surface-btn splat-shadow-sm"
 			onclick={toggleSurface}
-			title="Switch monochrome surface"
-			aria-label="Switch light or dark monochrome surface"
+			title="Cycle theme: Auto (System) / Light / Dark"
+			aria-label="Cycle monochrome theme preference"
 		>
-			<span class="label-desktop">{appState.params.surfaceMode === 'light' ? '◐ LIGHT' : '◑ DARK'}</span>
-			<span class="label-mobile">{appState.params.surfaceMode === 'light' ? '◐' : '◑'}</span>
+			<span class="label-desktop">{surfaceLabelDesktop}</span>
+			<span class="label-mobile">{surfaceLabelMobile}</span>
 		</button>
 	</div>
 

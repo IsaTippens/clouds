@@ -1,4 +1,4 @@
-import type { CloudParams, CloudPreset, CloudTelemetry } from './types';
+import type { CloudParams, CloudPreset, CloudTelemetry, SurfaceMode, ThemePreference } from './types';
 
 export const DEFAULT_PARAMS: CloudParams = {
 	// Time
@@ -192,6 +192,7 @@ export const appState = $state<{
 	telemetry: CloudTelemetry;
 	menuOpen: boolean;
 	activePresetId: string | null;
+	themePreference: ThemePreference;
 }>({
 	params: { ...DEFAULT_PARAMS },
 	telemetry: {
@@ -199,8 +200,63 @@ export const appState = $state<{
 		weights: { ...DEFAULT_TELEMETRY.weights }
 	},
 	menuOpen: true,
-	activePresetId: 'auto-weather'
+	activePresetId: 'auto-weather',
+	themePreference: 'auto'
 });
+
+const THEME_STORAGE_KEY = 'strata-theme-preference';
+
+function resolveSystemSurfaceMode(): SurfaceMode {
+	if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+		return 'light';
+	}
+	return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+export function setThemePreference(pref: ThemePreference): void {
+	appState.themePreference = pref;
+	appState.params.surfaceMode = pref === 'auto' ? resolveSystemSurfaceMode() : pref;
+	if (typeof window !== 'undefined') {
+		try {
+			window.localStorage.setItem(THEME_STORAGE_KEY, pref);
+		} catch {
+			// Ignore storage quota / privacy mode errors
+		}
+	}
+}
+
+export function cycleThemePreference(): void {
+	const order: ThemePreference[] = ['auto', 'light', 'dark'];
+	const idx = order.indexOf(appState.themePreference);
+	setThemePreference(order[(idx + 1) % order.length]);
+}
+
+export function initThemePreference(): () => void {
+	if (typeof window === 'undefined') return () => {};
+
+	let saved: ThemePreference = 'auto';
+	try {
+		const raw = window.localStorage.getItem(THEME_STORAGE_KEY);
+		if (raw === 'auto' || raw === 'light' || raw === 'dark') {
+			saved = raw;
+		}
+	} catch {
+		// Ignore storage access errors
+	}
+
+	appState.themePreference = saved;
+	appState.params.surfaceMode = saved === 'auto' ? resolveSystemSurfaceMode() : saved;
+
+	if (typeof window.matchMedia !== 'function') return () => {};
+	const media = window.matchMedia('(prefers-color-scheme: dark)');
+	const handleSystemChange = (event: MediaQueryListEvent) => {
+		if (appState.themePreference === 'auto') {
+			appState.params.surfaceMode = event.matches ? 'dark' : 'light';
+		}
+	};
+	media.addEventListener('change', handleSystemChange);
+	return () => media.removeEventListener('change', handleSystemChange);
+}
 
 export function applyPreset(id: string): void {
 	const preset = PRESETS.find((entry) => entry.id === id);
@@ -210,7 +266,8 @@ export function applyPreset(id: string): void {
 }
 
 export function resetParams(): void {
-	Object.assign(appState.params, DEFAULT_PARAMS);
+	const currentSurface = appState.params.surfaceMode;
+	Object.assign(appState.params, DEFAULT_PARAMS, { surfaceMode: currentSurface });
 	appState.activePresetId = 'auto-weather';
 }
 
