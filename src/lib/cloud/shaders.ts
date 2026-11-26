@@ -59,12 +59,21 @@ varying float vEdgeFade;
 ${VOLUME_SAMPLE_GLSL}
 
 void main() {
+	if (aDensity <= 0.005) {
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+		gl_PointSize = 0.0;
+		vEdgeFade = 0.0;
+		vLight = 0.0;
+		vDensity = 0.0;
+		vSeed = 0.0;
+		return;
+	}
+
 	vec3 pos = position;
 
-	// Continuous wind advection with periodic domain wrap across [-uHalfExtentXZ, +uHalfExtentXZ]
+	// Continuous sub-voxel sliding-window advection (infinite non-repeating stream, zero wrap)
 	float span = uHalfExtentXZ * 2.0;
-	vec2 shiftedXZ = pos.xz + uWindOffset;
-	pos.xz = mod(shiftedXZ + uHalfExtentXZ, span) - uHalfExtentXZ;
+	pos.xz += uWindOffset;
 
 	// Organic convective & turbulent micro-evolution
 	float phase = aSeed * 6.2831853 + uTime * (0.45 + uTurbulence * 0.9);
@@ -73,11 +82,11 @@ void main() {
 	pos.y += cos(phase * 0.85 + pos.x * 0.3) * swirlAmp * 0.65;
 	pos.z += cos(phase * 1.15 - pos.y * 0.4) * swirlAmp;
 
-	// Smooth radial boundary fade so wrapped points never pop at domain edges
+	// Smooth radial horizon fade so new clouds materialize & exit gently at the circular rim
 	float radial = length(pos.xz) / uHalfExtentXZ;
-	vEdgeFade = 1.0 - smoothstep(0.82, 1.02, radial);
+	vEdgeFade = 1.0 - smoothstep(0.78, 1.0, radial);
 
-	// Real-time 3D volumetric raymarch toward live uSunDir through the advected cloud volume
+	// Real-time 3D volumetric raymarch toward live uSunDir through the streaming cloud volume
 	vec3 sunDir = normalize(uSunDir);
 	float stepWorld = max(uHeightY, 2.0) * 0.22;
 	float opticalDepth = 0.0;
@@ -86,10 +95,11 @@ void main() {
 		float sNy = (samplePos.y - uBaseY) / max(uHeightY, 0.01);
 		if (sNy < 0.0 || sNy > 1.0) continue;
 		float sRadial = length(samplePos.xz) / uHalfExtentXZ;
-		if (sRadial >= 1.02) continue;
-		float sEdge = 1.0 - smoothstep(0.82, 1.02, sRadial);
-		vec2 unwrapped = mod(samplePos.xz - uWindOffset + uHalfExtentXZ, span) / span;
-		float d = sampleVolume3D(uVolumeAtlas, vec3(unwrapped.x, sNy, unwrapped.y));
+		if (sRadial >= 1.0) continue;
+		float sEdge = 1.0 - smoothstep(0.78, 1.0, sRadial);
+		vec2 sampleUv = (samplePos.xz - uWindOffset + uHalfExtentXZ) / span;
+		if (sampleUv.x < 0.0 || sampleUv.x > 1.0 || sampleUv.y < 0.0 || sampleUv.y > 1.0) continue;
+		float d = sampleVolume3D(uVolumeAtlas, vec3(sampleUv.x, sNy, sampleUv.y));
 		opticalDepth += d * sEdge * (i <= 2 ? 0.58 : 0.40);
 	}
 
@@ -274,16 +284,17 @@ void main() {
 		float t = tEnter + (float(i) + bayer) * stepT;
 		vec3 p = vec3(vWorldXZ.x, 0.0, vWorldXZ.y) + sunDir * t;
 
-		// Exact circular cloud boundary match (zero square clipping!)
+		// Exact circular cloud boundary match (zero square clipping, zero wrap)
 		float radial = length(p.xz) / uHalfExtentXZ;
-		if (radial >= 1.02) continue;
+		if (radial >= 1.0) continue;
 
-		float edgeFade = 1.0 - smoothstep(0.82, 1.02, radial);
+		float edgeFade = 1.0 - smoothstep(0.78, 1.0, radial);
 		float ny = (p.y - uBaseY) / max(uHeightY, 0.01);
 
-		// Undo live wind advection with exact periodic wrap so shadow tracks moving clouds 1:1
-		vec2 unwrapped = mod(p.xz - uWindOffset + uHalfExtentXZ, spanXZ) / spanXZ;
-		float d = sampleVolume3D(uVolumeAtlas, vec3(unwrapped.x, ny, unwrapped.y));
+		// Sample streaming volume atlas at continuous sub-voxel offset (1:1 locked to moving clouds)
+		vec2 sampleUv = (p.xz - uWindOffset + uHalfExtentXZ) / spanXZ;
+		if (sampleUv.x < 0.0 || sampleUv.x > 1.0 || sampleUv.y < 0.0 || sampleUv.y > 1.0) continue;
+		float d = sampleVolume3D(uVolumeAtlas, vec3(sampleUv.x, ny, sampleUv.y));
 		tau += d * edgeFade;
 	}
 

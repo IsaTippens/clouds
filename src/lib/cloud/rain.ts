@@ -7,6 +7,7 @@
 
 import * as THREE from 'three';
 import type { CloudParams, ConcreteCloudType } from '$lib/types';
+import type { RainColumnSample } from './generator';
 import { clamp, createPrng, lerp, smoothstep } from './noise';
 
 export interface RainStatus {
@@ -14,13 +15,17 @@ export interface RainStatus {
 	rainRateMmHr: number;
 }
 
+export type RainColumnSampler = (rand: () => number, minDensity?: number) => RainColumnSample | null;
+
 export interface RainSystem {
 	update(
 		dt: number,
 		elapsed: number,
 		params: CloudParams,
 		cloudBaseY: number,
-		dominantType: ConcreteCloudType
+		dominantType: ConcreteCloudType,
+		sampleRainColumn?: RainColumnSampler,
+		overheadCloudFactor?: number
 	): RainStatus;
 	dispose(): void;
 }
@@ -32,9 +37,11 @@ const GROUND_SPLASH_Y = 0.04;
 const MAX_GROUND_RADIUS = 13.8;
 
 interface RainDrop {
+	active: boolean;
 	x: number;
 	y: number;
 	z: number;
+	spawnY: number;
 	speed: number;
 	length: number;
 	alpha: number;
@@ -190,9 +197,11 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 	const drops: RainDrop[] = [];
 	for (let i = 0; i < MAX_DROPS; i++) {
 		drops.push({
+			active: false,
 			x: 0,
 			y: -1,
 			z: 0,
+			spawnY: 3.0,
 			speed: 12.5 + rand() * 5.5,
 			length: 0.52 + rand() * 0.58,
 			alpha: 0.45 + rand() * 0.55,
@@ -302,32 +311,33 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 	function spawnDrop(
 		drop: RainDrop,
 		cloudBaseY: number,
-		coverage: number,
-		windDirX: number,
-		windDirZ: number,
-		windSpeed: number,
+		sampleRainColumn: RainColumnSampler | undefined,
 		initialFill: boolean
 	): void {
-		// Concentrate rainfall beneath the primary cloud core
-		const coreRadius = lerp(5.2, 9.8, clamp(coverage, 0, 1));
-		const angle = rand() * Math.PI * 2;
-		// Gaussian-like radial falloff so core is densest and edges taper organically
-		const radial = Math.pow(rand(), 0.72) * coreRadius;
+		const col = sampleRainColumn ? sampleRainColumn(rand, 0.24) : null;
+		if (!col) {
+			// No dense cloud overhead: keep drop inactive so rain never falls from clear sky
+			drop.active = false;
+			drop.y = -1;
+			return;
+		}
 
-		// Offset spawn slightly upwind so slanted streaks land squarely beneath the cloud shadow/core
-		const upwindShift = windSpeed * 0.065;
-		drop.x = Math.cos(angle) * radial - windDirX * upwindShift;
-		drop.z = Math.sin(angle) * radial - windDirZ * upwindShift;
+		drop.active = true;
+		drop.x = col.x;
+		drop.z = col.z;
 
-		const safeBaseY = Math.max(1.6, cloudBaseY);
+		const localBaseY = Math.max(1.4, col.y || cloudBaseY);
+		drop.spawnY = localBaseY;
 		if (initialFill) {
-			drop.y = rand() * (safeBaseY + 0.35);
+			drop.y = rand() * localBaseY;
 		} else {
-			drop.y = safeBaseY + 0.1 + rand() * 0.55;
+			drop.y = localBaseY + rand() * 0.25;
 		}
 		drop.speed = 11.5 + rand() * 6.0;
 		drop.length = 0.5 + rand() * 0.62;
-		drop.alpha = (0.42 + rand() * 0.58) * (1.0 - smoothstep(coreRadius * 0.62, coreRadius * 1.05, radial) * 0.6);
+		// Stronger, darker rain curtains under thicker cloud cores
+		const densityBoost = clamp((col.density - 0.2) / 0.75, 0.25, 1.0);
+		drop.alpha = (0.38 + rand() * 0.62) * densityBoost;
 	}
 
 	function triggerSplash(x: number, z: number, strength: number): void {
@@ -390,7 +400,9 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 		_elapsed: number,
 		params: CloudParams,
 		cloudBaseY: number,
-		dominantType: ConcreteCloudType
+		dominantType: ConcreteCloudType,
+		sampleRainColumn?: RainColumnSampler,
+		overheadCloudFactor = 1.0
 	): RainStatus {
 		const isDark = params.surfaceMode === 'dark';
 		const darkVal = isDark ? 1.0 : 0.0;
@@ -400,7 +412,9 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 		const simDt = params.paused ? 0 : dt * params.timeSpeed;
 		rainClock += simDt;
 
-		const targetStrength = computeTargetStrength(params, dominantType, rainClock);
+		// Modulate rain strength by actual overhead cloud cover (zero rain under clear sky!)
+		const cloudPresence = smoothstep(0.02, 0.28, overheadCloudFactor);
+		const targetStrength = computeTargetStrength(params, dominantType, rainClock) * cloudPresence;
 
 		// Smooth ramp for organic rain onset/dissipation; instant response when toggled while paused
 		if (params.paused) {
@@ -449,23 +463,29 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 		const turbScale = params.turbulence * 1.4;
 
 		const activeDrops = rainActive
-			? Math.max(80, Math.round(MAX_DROPS * Math.pow(effectiveStrength, 0.82)))
+			? Math.max(60, Math.round(MAX_DROPS * Math.pow(effectiveStrength, 0.82)))
 			: 0;
 
 		if (!seededInitialDrops && activeDrops > 0) {
 			for (let i = 0; i < MAX_DROPS; i++) {
-				spawnDrop(drops[i], safeBaseY, params.coverage, dirX, dirZ, params.windSpeed, true);
+				spawnDrop(drops[i], safeBaseY, sampleRainColumn, true);
 			}
 			seededInitialDrops = true;
 		}
 
-		// Update rain streaks
+		// Update rain streaks (only emitting vertices for drops spawned beneath real clouds)
 		const splashChance = clamp(0.14 + effectiveStrength * 0.28, 0.1, 0.45);
+		let writtenDrops = 0;
 		for (let i = 0; i < activeDrops; i++) {
 			const d = drops[i];
 			const vx = dirX * windDriftScale + d.jitterX * turbScale;
 			const vz = dirZ * windDriftScale + d.jitterZ * turbScale;
 			const vy = d.speed * (0.85 + 0.35 * effectiveStrength);
+
+			if (!d.active) {
+				spawnDrop(d, safeBaseY, sampleRainColumn, true);
+				if (!d.active) continue;
+			}
 
 			if (simDt > 0) {
 				d.x += vx * simDt;
@@ -476,26 +496,29 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 					if (rand() < splashChance) {
 						triggerSplash(d.x, d.z, effectiveStrength);
 					}
-					spawnDrop(d, safeBaseY, params.coverage, dirX, dirZ, params.windSpeed, false);
-				} else if (d.y > safeBaseY + 0.9) {
-					d.y = safeBaseY + rand() * 0.45;
+					spawnDrop(d, safeBaseY, sampleRainColumn, false);
+					if (!d.active) continue;
+				} else if (d.y > d.spawnY + 0.9) {
+					d.y = d.spawnY + rand() * 0.35;
 				}
-			} else if (d.y < 0 || d.y > safeBaseY + 0.8) {
-				spawnDrop(d, safeBaseY, params.coverage, dirX, dirZ, params.windSpeed, true);
+			} else if (d.y < 0 || d.y > d.spawnY + 0.8) {
+				spawnDrop(d, safeBaseY, sampleRainColumn, true);
+				if (!d.active) continue;
 			}
 
-			// Compute slanted streak endpoints (tail -> head)
+			// Compute slanted streak endpoints (tail -> head) bounded under this drop's local cloud base
 			const streakTime = (d.length * (0.75 + 0.55 * effectiveStrength)) / Math.max(vy, 1.0);
 			const headY = Math.max(0.02, d.y);
-			const tailY = Math.min(safeBaseY + 0.45, headY + vy * streakTime);
+			const tailY = Math.min(d.spawnY + 0.25, headY + vy * streakTime);
 			const actualDt = (tailY - headY) / Math.max(vy, 1.0);
 			const tailX = d.x - vx * actualDt;
 			const tailZ = d.z - vz * actualDt;
 
-			const v0 = i * 2;
+			const v0 = writtenDrops * 2;
 			const v1 = v0 + 1;
 			const p0 = v0 * 3;
 			const p1 = v1 * 3;
+			writtenDrops++;
 
 			rainPositions[p0] = tailX;
 			rainPositions[p0 + 1] = tailY;
@@ -504,8 +527,8 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 			rainPositions[p1 + 1] = headY;
 			rainPositions[p1 + 2] = d.z;
 
-			// Soft fade near cloud base & radial domain edge
-			const baseFade = 1.0 - smoothstep(safeBaseY - 0.2, safeBaseY + 0.45, headY);
+			// Soft fade near local cloud base & radial domain edge
+			const baseFade = 1.0 - smoothstep(d.spawnY - 0.2, d.spawnY + 0.3, headY);
 			const groundFade = smoothstep(0.0, 0.25, headY);
 			const radialFade = 1.0 - smoothstep(10.5, MAX_GROUND_RADIUS, Math.hypot(d.x, d.z));
 			const dropAlpha = d.alpha * baseFade * radialFade;
@@ -514,7 +537,7 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 			rainAlpha[v1] = dropAlpha * (0.65 + 0.35 * groundFade);
 		}
 
-		rainGeo.setDrawRange(0, activeDrops * 2);
+		rainGeo.setDrawRange(0, writtenDrops * 2);
 		rainPosAttr.needsUpdate = true;
 		rainAlphaAttr.needsUpdate = true;
 

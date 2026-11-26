@@ -8,7 +8,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { CloudParams, CloudTelemetry } from '$lib/types';
-import { generateCloudField, type GeneratedCloudData } from './generator';
+import { createStreamingCloudField, type StreamingCloudField } from './generator';
 import { computeMeteorology, type MeteorologyState } from './meteorology';
 import { clamp } from './noise';
 import {
@@ -256,15 +256,22 @@ export function createCloudViewport(
 	const stencilGrid = createStencilGrid();
 	scene.add(stencilGrid.group);
 
-	// Initial cloud generation
-	let cloudData: GeneratedCloudData = generateCloudField(currentParams, meteo);
+	// Initial infinite streaming cloud field ("inf-dev")
+	let totalScrollX = 0;
+	let totalScrollZ = 0;
+	let cloudField: StreamingCloudField = createStreamingCloudField(
+		currentParams,
+		meteo,
+		totalScrollX,
+		totalScrollZ
+	);
 
 	// 3D Volume density atlas DataTexture (shared by real-time 3D cloud & ground shadow shaders)
-	const volumeAtlasBuffer = new Uint8Array(cloudData.volumeAtlasData);
+	const volumeAtlasBuffer = new Uint8Array(cloudField.volumeAtlasData);
 	const volumeAtlasTexture = new THREE.DataTexture(
 		volumeAtlasBuffer,
-		cloudData.volumeAtlasWidth,
-		cloudData.volumeAtlasHeight,
+		cloudField.volumeAtlasWidth,
+		cloudField.volumeAtlasHeight,
 		THREE.RGBAFormat
 	);
 	volumeAtlasTexture.magFilter = THREE.LinearFilter;
@@ -293,26 +300,61 @@ export function createCloudViewport(
 	groundMesh.position.y = 0.005;
 	scene.add(groundMesh);
 
-	function applyCloudDataToGeometry(data: GeneratedCloudData): void {
-		cloudGeometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
-		cloudGeometry.setAttribute('aDensity', new THREE.BufferAttribute(data.aDensity, 1));
-		cloudGeometry.setAttribute('aHeightNorm', new THREE.BufferAttribute(data.aHeightNorm, 1));
-		cloudGeometry.setAttribute('aSeed', new THREE.BufferAttribute(data.aSeed, 1));
-		cloudGeometry.setAttribute('aSize', new THREE.BufferAttribute(data.aSize, 1));
-		cloudGeometry.setAttribute('aShade', new THREE.BufferAttribute(data.aShade, 1));
+	let posAttr: THREE.BufferAttribute;
+	let densityAttr: THREE.BufferAttribute;
+	let heightNormAttr: THREE.BufferAttribute;
+	let seedAttr: THREE.BufferAttribute;
+	let sizeAttr: THREE.BufferAttribute;
+	let shadeAttr: THREE.BufferAttribute;
+
+	function bindCloudFieldToGeometry(field: StreamingCloudField): void {
+		posAttr = new THREE.BufferAttribute(field.positions, 3);
+		densityAttr = new THREE.BufferAttribute(field.aDensity, 1);
+		heightNormAttr = new THREE.BufferAttribute(field.aHeightNorm, 1);
+		seedAttr = new THREE.BufferAttribute(field.aSeed, 1);
+		sizeAttr = new THREE.BufferAttribute(field.aSize, 1);
+		shadeAttr = new THREE.BufferAttribute(field.aShade, 1);
+
+		posAttr.setUsage(THREE.DynamicDrawUsage);
+		densityAttr.setUsage(THREE.DynamicDrawUsage);
+		heightNormAttr.setUsage(THREE.DynamicDrawUsage);
+		seedAttr.setUsage(THREE.DynamicDrawUsage);
+		sizeAttr.setUsage(THREE.DynamicDrawUsage);
+		shadeAttr.setUsage(THREE.DynamicDrawUsage);
+
+		cloudGeometry.setAttribute('position', posAttr);
+		cloudGeometry.setAttribute('aDensity', densityAttr);
+		cloudGeometry.setAttribute('aHeightNorm', heightNormAttr);
+		cloudGeometry.setAttribute('aSeed', seedAttr);
+		cloudGeometry.setAttribute('aSize', sizeAttr);
+		cloudGeometry.setAttribute('aShade', shadeAttr);
 		cloudGeometry.computeBoundingSphere();
 
 		// Update 3D volume atlas texture in place
-		volumeAtlasBuffer.set(data.volumeAtlasData);
+		volumeAtlasBuffer.set(field.volumeAtlasData);
 		volumeAtlasTexture.needsUpdate = true;
 
-		cloudUniforms.uHalfExtentXZ.value = data.bounds.halfExtentXZ;
-		cloudUniforms.uBaseY.value = data.bounds.baseY;
-		cloudUniforms.uHeightY.value = data.bounds.heightY;
+		cloudUniforms.uHalfExtentXZ.value = field.bounds.halfExtentXZ;
+		cloudUniforms.uBaseY.value = field.bounds.baseY;
+		cloudUniforms.uHeightY.value = field.bounds.heightY;
+		cloudUniforms.uWindOffset.value.set(field.subOffsetX, field.subOffsetZ);
 
-		groundUniforms.uHalfExtentXZ.value = data.bounds.halfExtentXZ;
-		groundUniforms.uBaseY.value = data.bounds.baseY;
-		groundUniforms.uHeightY.value = data.bounds.heightY;
+		groundUniforms.uHalfExtentXZ.value = field.bounds.halfExtentXZ;
+		groundUniforms.uBaseY.value = field.bounds.baseY;
+		groundUniforms.uHeightY.value = field.bounds.heightY;
+		groundUniforms.uWindOffset.value.set(field.subOffsetX, field.subOffsetZ);
+	}
+
+	function uploadStreamedSlice(): void {
+		posAttr.needsUpdate = true;
+		densityAttr.needsUpdate = true;
+		heightNormAttr.needsUpdate = true;
+		seedAttr.needsUpdate = true;
+		sizeAttr.needsUpdate = true;
+		shadeAttr.needsUpdate = true;
+
+		volumeAtlasBuffer.set(cloudField.volumeAtlasData);
+		volumeAtlasTexture.needsUpdate = true;
 	}
 
 	function syncUniforms(
@@ -346,7 +388,7 @@ export function createCloudViewport(
 		gUniforms.uSunShadowStrength.value = sunShadowStrength;
 	}
 
-	applyCloudDataToGeometry(cloudData);
+	bindCloudFieldToGeometry(cloudField);
 	syncUniforms(currentParams, meteo, cloudUniforms, groundUniforms);
 
 	// Atmospheric & air-traffic subsystems (wind streamlines, rain curtains/splashes, aircraft & birds)
@@ -384,7 +426,6 @@ export function createCloudViewport(
 
 	// Simulation, debounced rebuild, & telemetry state
 	let simTime = 0;
-	const windOffset = new THREE.Vector2(0, 0);
 	let geometryDirty = false;
 	let lastRebuildAt = performance.now();
 
@@ -400,7 +441,7 @@ export function createCloudViewport(
 		onTelemetry({
 			dominantType: meteo.dominantType,
 			weights: { ...meteo.weights },
-			activePoints: cloudData.activePoints,
+			activePoints: cloudField.activePoints,
 			baseAltitudeKm: meteo.baseAltitudeKm,
 			topAltitudeKm: meteo.topAltitudeKm,
 			sunElevationDeg: meteo.sunElevationDeg,
@@ -416,10 +457,18 @@ export function createCloudViewport(
 
 	// Prime atmospheric & air-traffic systems and emit initial telemetry immediately
 	{
-		const cloudBaseY = cloudData.bounds.baseY;
-		const cloudTopY = cloudData.bounds.baseY + cloudData.bounds.heightY;
+		const cloudBaseY = cloudField.bounds.baseY;
+		const cloudTopY = cloudField.bounds.baseY + cloudField.bounds.heightY;
 		windSystem.update(0, 0, currentParams);
-		rainStatus = rainSystem.update(0, 0, currentParams, cloudBaseY, meteo.dominantType);
+		rainStatus = rainSystem.update(
+			0,
+			0,
+			currentParams,
+			cloudBaseY,
+			meteo.dominantType,
+			cloudField.sampleRainColumn,
+			cloudField.getOverheadCloudFactor()
+		);
 		trafficStatus = airTrafficSystem.update(0, 0, currentParams, cloudBaseY, cloudTopY);
 	}
 	emitTelemetry();
@@ -440,16 +489,16 @@ export function createCloudViewport(
 			fpsFrames = 0;
 		}
 
-		// Debounced structural cloud regeneration (keeps slider drags smooth at 60fps)
+		// Debounced structural cloud regeneration (preserves current infinite scroll position)
 		if (geometryDirty && now - lastRebuildAt >= 75) {
-			cloudData = generateCloudField(currentParams, meteo);
-			applyCloudDataToGeometry(cloudData);
+			cloudField = createStreamingCloudField(currentParams, meteo, totalScrollX, totalScrollZ);
+			bindCloudFieldToGeometry(cloudField);
 			geometryDirty = false;
 			lastRebuildAt = now;
 			emitTelemetry();
 		}
 
-		// Continuous real-time wind advection & evolution
+		// Continuous infinite non-repeating wind streaming
 		if (!currentParams.paused) {
 			const speedMult = currentParams.timeSpeed;
 			simTime += dt * speedMult;
@@ -457,20 +506,35 @@ export function createCloudViewport(
 			const windRad = (currentParams.windDirection * Math.PI) / 180;
 			const dirX = Math.sin(windRad);
 			const dirZ = -Math.cos(windRad);
-			const drift = currentParams.windSpeed * 0.045 * speedMult * dt;
-			windOffset.x += dirX * drift;
-			windOffset.y += dirZ * drift;
+			const drift = currentParams.windSpeed * 0.055 * speedMult * dt;
+			const driftX = dirX * drift;
+			const driftZ = dirZ * drift;
+			totalScrollX += driftX;
+			totalScrollZ += driftZ;
+
+			const sliceShifted = cloudField.advance(driftX, driftZ);
+			if (sliceShifted) {
+				uploadStreamedSlice();
+			}
 
 			cloudUniforms.uTime.value = simTime;
-			cloudUniforms.uWindOffset.value.copy(windOffset);
-			groundUniforms.uWindOffset.value.copy(windOffset);
+			cloudUniforms.uWindOffset.value.set(cloudField.subOffsetX, cloudField.subOffsetZ);
+			groundUniforms.uWindOffset.value.set(cloudField.subOffsetX, cloudField.subOffsetZ);
 		}
 
-		// Update wind currents, rain events, and air traffic every frame
-		const cloudBaseY = cloudData.bounds.baseY;
-		const cloudTopY = cloudData.bounds.baseY + cloudData.bounds.heightY;
+		// Update wind currents, localized rain events under clouds, and air traffic every frame
+		const cloudBaseY = cloudField.bounds.baseY;
+		const cloudTopY = cloudField.bounds.baseY + cloudField.bounds.heightY;
 		windSystem.update(dt, simTime, currentParams);
-		rainStatus = rainSystem.update(dt, simTime, currentParams, cloudBaseY, meteo.dominantType);
+		rainStatus = rainSystem.update(
+			dt,
+			simTime,
+			currentParams,
+			cloudBaseY,
+			meteo.dominantType,
+			cloudField.sampleRainColumn,
+			cloudField.getOverheadCloudFactor()
+		);
 		trafficStatus = airTrafficSystem.update(dt, simTime, currentParams, cloudBaseY, cloudTopY);
 
 		// Smooth camera preset animation
