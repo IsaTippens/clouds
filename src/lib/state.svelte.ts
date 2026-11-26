@@ -33,6 +33,8 @@ export const DEFAULT_PARAMS: CloudParams = {
 	windDensity: 0.65,
 	rainMode: 'auto',
 	rainIntensity: 0.7,
+	lightningMode: 'auto',
+	tornadoMode: 'auto',
 	showPlanes: true,
 	showHelicopters: true,
 	showBirds: true
@@ -56,6 +58,9 @@ export const DEFAULT_TELEMETRY: CloudTelemetry = {
 	fps: 0,
 	rainActive: false,
 	rainRateMmHr: 0,
+	precipPhase: 'dry',
+	lightningActive: false,
+	tornadoActive: false,
 	aircraftCount: 0,
 	birdCount: 0
 };
@@ -78,7 +83,9 @@ export const PRESETS: CloudPreset[] = [
 			turbulence: 0.38,
 			coverage: 0.62,
 			rainMode: 'auto',
-			rainIntensity: 0.7
+			rainIntensity: 0.7,
+			lightningMode: 'auto',
+			tornadoMode: 'auto'
 		}
 	},
 	{
@@ -98,7 +105,10 @@ export const PRESETS: CloudPreset[] = [
 			windSpeed: 7,
 			windDirection: 210,
 			turbulence: 0.42,
-			coverage: 0.54
+			coverage: 0.54,
+			rainMode: 'auto',
+			lightningMode: 'auto',
+			tornadoMode: 'auto'
 		}
 	},
 	{
@@ -120,7 +130,9 @@ export const PRESETS: CloudPreset[] = [
 			turbulence: 0.14,
 			coverage: 0.88,
 			rainMode: 'auto',
-			rainIntensity: 0.45
+			rainIntensity: 0.45,
+			lightningMode: 'auto',
+			tornadoMode: 'auto'
 		}
 	},
 	{
@@ -140,7 +152,10 @@ export const PRESETS: CloudPreset[] = [
 			windSpeed: 34,
 			windDirection: 265,
 			turbulence: 0.28,
-			coverage: 0.45
+			coverage: 0.45,
+			rainMode: 'auto',
+			lightningMode: 'auto',
+			tornadoMode: 'auto'
 		}
 	},
 	{
@@ -162,7 +177,9 @@ export const PRESETS: CloudPreset[] = [
 			turbulence: 0.88,
 			coverage: 0.84,
 			rainMode: 'auto',
-			rainIntensity: 0.92
+			rainIntensity: 0.92,
+			lightningMode: 'auto',
+			tornadoMode: 'auto'
 		}
 	},
 	{
@@ -182,7 +199,58 @@ export const PRESETS: CloudPreset[] = [
 			windSpeed: 18,
 			windDirection: 280,
 			turbulence: 0.46,
-			coverage: 0.66
+			coverage: 0.66,
+			rainMode: 'auto',
+			lightningMode: 'auto',
+			tornadoMode: 'auto'
+		}
+	},
+	{
+		id: 'tornado-vortex',
+		name: 'Tornado Vortex',
+		code: 'TO-06',
+		description: 'Violent mesocyclonic funnel descending from a rotating supercell wall cloud.',
+		params: {
+			cloudType: 'cumulonimbus',
+			timeOfDay: 16.5,
+			latitude: 35.47,
+			longitude: -97.52,
+			altitude: 4.8,
+			humidity: 0.92,
+			pressure: 970,
+			temperature: 24,
+			windSpeed: 30,
+			windDirection: 205,
+			turbulence: 0.94,
+			coverage: 0.86,
+			rainMode: 'auto',
+			rainIntensity: 0.85,
+			lightningMode: 'auto',
+			tornadoMode: 'on'
+		}
+	},
+	{
+		id: 'winter-squall',
+		name: 'Winter Squall',
+		code: 'SN-07',
+		description: 'Sub-zero overcast snow deck producing drifting monochrome flakes beneath dense clouds.',
+		params: {
+			cloudType: 'stratus',
+			timeOfDay: 11.25,
+			latitude: 64.15,
+			longitude: -21.94,
+			altitude: 1.4,
+			humidity: 0.9,
+			pressure: 1004,
+			temperature: -7,
+			windSpeed: 14,
+			windDirection: 315,
+			turbulence: 0.48,
+			coverage: 0.85,
+			rainMode: 'on',
+			rainIntensity: 0.78,
+			lightningMode: 'off',
+			tornadoMode: 'off'
 		}
 	}
 ];

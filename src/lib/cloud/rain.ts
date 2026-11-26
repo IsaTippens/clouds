@@ -6,13 +6,14 @@
  */
 
 import * as THREE from 'three';
-import type { CloudParams, ConcreteCloudType } from '$lib/types';
+import type { CloudParams, ConcreteCloudType, PrecipPhase } from '$lib/types';
 import type { RainColumnSample } from './generator';
 import { clamp, createPrng, lerp, smoothstep } from './noise';
 
 export interface RainStatus {
 	rainActive: boolean;
 	rainRateMmHr: number;
+	precipPhase: PrecipPhase;
 }
 
 export type RainColumnSampler = (rand: () => number, minDensity?: number) => RainColumnSample | null;
@@ -33,6 +34,7 @@ export interface RainSystem {
 const MAX_DROPS = 1100;
 const TOTAL_DROP_VERTS = MAX_DROPS * 2;
 const MAX_SPLASHES = 96;
+const MAX_SNOW = 1400;
 const GROUND_SPLASH_Y = 0.04;
 const MAX_GROUND_RADIUS = 13.8;
 
@@ -47,6 +49,21 @@ interface RainDrop {
 	alpha: number;
 	jitterX: number;
 	jitterZ: number;
+}
+
+interface SnowFlake {
+	active: boolean;
+	x: number;
+	y: number;
+	z: number;
+	spawnY: number;
+	fallSpeed: number;
+	size: number;
+	phase: number;
+	swayAmp: number;
+	swayFreq: number;
+	alpha: number;
+	seed: number;
 }
 
 interface SplashRing {
@@ -188,6 +205,54 @@ void main() {
 }
 `;
 
+const SNOW_VERTEX_SHADER = /* glsl */ `
+attribute float aSize;
+attribute float aAlpha;
+attribute float aSeed;
+
+uniform float uPixelRatio;
+
+varying float vAlpha;
+varying float vSeed;
+
+void main() {
+	vAlpha = aAlpha;
+	vSeed = aSeed;
+	vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+	gl_Position = projectionMatrix * mvPosition;
+	float dist = max(-mvPosition.z, 1.5);
+	gl_PointSize = clamp(aSize * uPixelRatio * (46.0 / dist), 1.5, 11.0);
+}
+`;
+
+const SNOW_FRAGMENT_SHADER = /* glsl */ `
+uniform float uDarkMode;
+uniform float uGlobalStrength;
+
+varying float vAlpha;
+varying float vSeed;
+
+void main() {
+	if (vAlpha <= 0.005 || uGlobalStrength <= 0.005) discard;
+
+	vec2 uv = gl_PointCoord * 2.0 - 1.0;
+	float r = length(uv);
+	if (r > 1.0) discard;
+
+	// Crisp splatted monochrome snow dot with subtle soft rim
+	float dotMask = 1.0 - smoothstep(0.55, 0.98, r);
+	float alpha = vAlpha * dotMask * uGlobalStrength * 0.9;
+	if (alpha <= 0.01) discard;
+
+	// Strictly monochrome: black/dark-grey ink on light mode, crisp bright white on dark mode
+	float lum = uDarkMode < 0.5
+		? mix(0.06, 0.28, clamp(vSeed * 0.55 + r * 0.45, 0.0, 1.0))
+		: mix(0.84, 1.0, clamp((1.0 - r * 0.32) * (0.85 + 0.15 * vSeed), 0.0, 1.0));
+
+	gl_FragColor = vec4(vec3(lum), alpha);
+}
+`;
+
 export function createRainSystem(scene: THREE.Scene): RainSystem {
 	const rand = createPrng(0x5241494e);
 	const group = new THREE.Group();
@@ -302,11 +367,101 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 	splashMesh.instanceMatrix.needsUpdate = true;
 
 	group.add(splashMesh);
+
+	// Splatted monochrome snow particle system (active when temperature <= 0 °C)
+	const flakes: SnowFlake[] = [];
+	for (let i = 0; i < MAX_SNOW; i++) {
+		flakes.push({
+			active: false,
+			x: 0,
+			y: -1,
+			z: 0,
+			spawnY: 3.0,
+			fallSpeed: 1.1 + rand() * 1.35,
+			size: 0.78 + rand() * 1.1,
+			phase: rand() * Math.PI * 2,
+			swayAmp: 0.35 + rand() * 0.75,
+			swayFreq: 1.1 + rand() * 1.6,
+			alpha: 0.55 + rand() * 0.45,
+			seed: rand()
+		});
+	}
+
+	const snowPositions = new Float32Array(MAX_SNOW * 3);
+	const snowSizes = new Float32Array(MAX_SNOW);
+	const snowAlphas = new Float32Array(MAX_SNOW);
+	const snowSeeds = new Float32Array(MAX_SNOW);
+
+	const snowGeo = new THREE.BufferGeometry();
+	const snowPosAttr = new THREE.BufferAttribute(snowPositions, 3);
+	snowPosAttr.setUsage(THREE.DynamicDrawUsage);
+	const snowSizeAttr = new THREE.BufferAttribute(snowSizes, 1);
+	snowSizeAttr.setUsage(THREE.DynamicDrawUsage);
+	const snowAlphaAttr = new THREE.BufferAttribute(snowAlphas, 1);
+	snowAlphaAttr.setUsage(THREE.DynamicDrawUsage);
+	const snowSeedAttr = new THREE.BufferAttribute(snowSeeds, 1);
+	snowSeedAttr.setUsage(THREE.DynamicDrawUsage);
+
+	snowGeo.setAttribute('position', snowPosAttr);
+	snowGeo.setAttribute('aSize', snowSizeAttr);
+	snowGeo.setAttribute('aAlpha', snowAlphaAttr);
+	snowGeo.setAttribute('aSeed', snowSeedAttr);
+
+	const snowUniforms = {
+		uDarkMode: { value: 0 },
+		uGlobalStrength: { value: 0 },
+		uPixelRatio: { value: typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1 }
+	};
+
+	const snowMat = new THREE.ShaderMaterial({
+		uniforms: snowUniforms,
+		vertexShader: SNOW_VERTEX_SHADER,
+		fragmentShader: SNOW_FRAGMENT_SHADER,
+		transparent: true,
+		depthWrite: false,
+		depthTest: true
+	});
+
+	const snowMesh = new THREE.Points(snowGeo, snowMat);
+	snowMesh.frustumCulled = false;
+	snowMesh.visible = false;
+	group.add(snowMesh);
+
 	scene.add(group);
 
 	let rainClock = 0;
 	let currentStrength = 0;
 	let seededInitialDrops = false;
+	let seededInitialFlakes = false;
+
+	function spawnFlake(
+		flake: SnowFlake,
+		cloudBaseY: number,
+		sampleRainColumn: RainColumnSampler | undefined,
+		initialFill: boolean
+	): void {
+		const col = sampleRainColumn ? sampleRainColumn(rand, 0.24) : null;
+		if (!col) {
+			flake.active = false;
+			flake.y = -1;
+			return;
+		}
+
+		flake.active = true;
+		flake.x = col.x;
+		flake.z = col.z;
+
+		const localBaseY = Math.max(1.4, col.y || cloudBaseY);
+		flake.spawnY = localBaseY;
+		flake.y = initialFill ? 0.05 + rand() * localBaseY : localBaseY + rand() * 0.35;
+		flake.fallSpeed = 1.05 + rand() * 1.4;
+		flake.size = 0.78 + rand() * 1.15;
+		flake.phase = rand() * Math.PI * 2;
+		flake.swayAmp = 0.35 + rand() * 0.85;
+		flake.swayFreq = 1.1 + rand() * 1.7;
+		const densityBoost = clamp((col.density - 0.2) / 0.75, 0.35, 1.0);
+		flake.alpha = (0.48 + rand() * 0.52) * densityBoost;
+	}
 
 	function spawnDrop(
 		drop: RainDrop,
@@ -406,8 +561,13 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 	): RainStatus {
 		const isDark = params.surfaceMode === 'dark';
 		const darkVal = isDark ? 1.0 : 0.0;
+		const isSnow = params.temperature <= 0;
 		rainUniforms.uDarkMode.value = darkVal;
 		splashUniforms.uDarkMode.value = darkVal;
+		snowUniforms.uDarkMode.value = darkVal;
+		if (typeof window !== 'undefined') {
+			snowUniforms.uPixelRatio.value = Math.min(window.devicePixelRatio || 1, 2);
+		}
 
 		const simDt = params.paused ? 0 : dt * params.timeSpeed;
 		rainClock += simDt;
@@ -430,25 +590,30 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 		const rainActive = currentStrength > 0.02 || targetStrength > 0.02;
 		const effectiveStrength = rainActive ? clamp(currentStrength, 0, 1) : 0;
 		rainUniforms.uGlobalStrength.value = effectiveStrength;
+		snowUniforms.uGlobalStrength.value = effectiveStrength;
 
-		// Realistic precipitation rate in mm/hr
-		const maxMmHr = dominantType === 'cumulonimbus' ? 52.0 : 32.0;
+		const precipPhase: PrecipPhase = !rainActive ? 'dry' : isSnow ? 'snow' : 'rain';
+
+		// Realistic precipitation rate (mm/h for rain, cm/h for snow)
+		const maxRate = isSnow ? 14.0 : dominantType === 'cumulonimbus' ? 52.0 : 32.0;
 		const rainRateMmHr = rainActive
-			? Math.round((Math.pow(effectiveStrength, 1.45) * maxMmHr + 0.9 * effectiveStrength) * 10) / 10
+			? Math.round((Math.pow(effectiveStrength, 1.45) * maxRate + 0.9 * effectiveStrength) * 10) / 10
 			: 0;
 
-		// Check if any splash rings are still finishing their dissipation
+		// Check if any splash rings are still finishing their dissipation (only relevant in rain mode)
 		let anySplashActive = false;
-		for (let i = 0; i < MAX_SPLASHES; i++) {
-			if (splashes[i].active) {
-				anySplashActive = true;
-				break;
+		if (!isSnow) {
+			for (let i = 0; i < MAX_SPLASHES; i++) {
+				if (splashes[i].active) {
+					anySplashActive = true;
+					break;
+				}
 			}
 		}
 
 		if (!rainActive && !anySplashActive) {
 			group.visible = false;
-			return { rainActive: false, rainRateMmHr: 0 };
+			return { rainActive: false, rainRateMmHr: 0, precipPhase: 'dry' };
 		}
 
 		group.visible = true;
@@ -457,6 +622,87 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 		const dirX = Math.sin(windRad);
 		const dirZ = -Math.cos(windRad);
 		const safeBaseY = Math.max(1.6, cloudBaseY);
+
+		if (isSnow) {
+			rainMesh.visible = false;
+			splashMesh.visible = false;
+			snowMesh.visible = rainActive;
+
+			const activeFlakes = rainActive
+				? Math.max(90, Math.round(MAX_SNOW * Math.pow(effectiveStrength, 0.78)))
+				: 0;
+
+			if (!seededInitialFlakes && activeFlakes > 0) {
+				for (let i = 0; i < MAX_SNOW; i++) {
+					spawnFlake(flakes[i], safeBaseY, sampleRainColumn, true);
+				}
+				seededInitialFlakes = true;
+			}
+
+			const windDriftScale = params.windSpeed * 0.14;
+			const turbBoost = 0.65 + params.turbulence * 0.95;
+			let writtenFlakes = 0;
+
+			for (let i = 0; i < activeFlakes; i++) {
+				const f = flakes[i];
+				if (!f.active) {
+					spawnFlake(f, safeBaseY, sampleRainColumn, true);
+					if (!f.active) continue;
+				}
+
+				if (simDt > 0) {
+					const tumbleX = Math.sin(rainClock * f.swayFreq + f.phase) * f.swayAmp * turbBoost;
+					const tumbleZ = Math.cos(rainClock * f.swayFreq * 0.83 + f.phase * 1.37) * f.swayAmp * turbBoost;
+					const vx = dirX * windDriftScale + tumbleX;
+					const vz = dirZ * windDriftScale + tumbleZ;
+					const vy = f.fallSpeed * (0.78 + 0.44 * effectiveStrength);
+
+					f.x += vx * simDt;
+					f.z += vz * simDt;
+					f.y -= vy * simDt;
+
+					if (f.y <= 0.02 || Math.hypot(f.x, f.z) > MAX_GROUND_RADIUS + 1.2) {
+						spawnFlake(f, safeBaseY, sampleRainColumn, false);
+						if (!f.active) continue;
+					} else if (f.y > f.spawnY + 0.9) {
+						f.y = f.spawnY + rand() * 0.35;
+					}
+				} else if (f.y < 0.02 || f.y > f.spawnY + 0.9) {
+					spawnFlake(f, safeBaseY, sampleRainColumn, true);
+					if (!f.active) continue;
+				}
+
+				const pIdx = writtenFlakes * 3;
+				snowPositions[pIdx] = f.x;
+				snowPositions[pIdx + 1] = f.y;
+				snowPositions[pIdx + 2] = f.z;
+				snowSizes[writtenFlakes] = f.size;
+				snowSeeds[writtenFlakes] = f.seed;
+
+				const baseFade = 1.0 - smoothstep(f.spawnY - 0.15, f.spawnY + 0.35, f.y);
+				const groundFade = smoothstep(0.02, 0.25, f.y);
+				const radialFade = 1.0 - smoothstep(10.5, MAX_GROUND_RADIUS, Math.hypot(f.x, f.z));
+				snowAlphas[writtenFlakes] = f.alpha * baseFade * groundFade * radialFade;
+				writtenFlakes++;
+			}
+
+			snowGeo.setDrawRange(0, writtenFlakes);
+			snowPosAttr.needsUpdate = true;
+			snowSizeAttr.needsUpdate = true;
+			snowAlphaAttr.needsUpdate = true;
+			snowSeedAttr.needsUpdate = true;
+
+			return {
+				rainActive,
+				rainRateMmHr,
+				precipPhase
+			};
+		}
+
+		// Rain mode (temperature > 0 °C)
+		snowMesh.visible = false;
+		rainMesh.visible = true;
+		splashMesh.visible = true;
 
 		// Horizontal wind drift velocity for rain slant
 		const windDriftScale = params.windSpeed * 0.24;
@@ -587,7 +833,8 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 
 		return {
 			rainActive,
-			rainRateMmHr
+			rainRateMmHr,
+			precipPhase
 		};
 	}
 
@@ -597,6 +844,8 @@ export function createRainSystem(scene: THREE.Scene): RainSystem {
 		rainMat.dispose();
 		splashGeo.dispose();
 		splashMat.dispose();
+		snowGeo.dispose();
+		snowMat.dispose();
 	}
 
 	return {

@@ -50,6 +50,8 @@ uniform vec3 uSunDir;
 uniform float uSunElevNorm;
 uniform float uBaseY;
 uniform float uHeightY;
+uniform float uFlashIntensity;
+uniform vec3 uFlashPos;
 
 varying float vLight;
 varying float vDensity;
@@ -109,6 +111,10 @@ void main() {
 
 	// Combine real-time directional transmittance with subtle ambient occlusion from aShade
 	vLight = clamp((liveTransmittance * 0.72 + heightLift * 0.18 + aShade * 0.10) * sunLift, 0.02, 1.0);
+	// Real-time sheet-lightning radial illumination inside surrounding storm clouds
+	float flashDist = length(pos - uFlashPos);
+	float flashFalloff = pow(1.0 - smoothstep(0.0, 9.5, flashDist), 1.6);
+	vLight = clamp(vLight + flashFalloff * uFlashIntensity * 0.85, 0.02, 1.0);
 	vDensity = aDensity;
 	vSeed = aSeed;
 
@@ -355,6 +361,8 @@ export interface CloudShaderUniforms {
 	uHeightY: THREE.IUniform<number>;
 	uShadowDither: THREE.IUniform<number>;
 	uDarkMode: THREE.IUniform<number>;
+	uFlashIntensity: THREE.IUniform<number>;
+	uFlashPos: THREE.IUniform<THREE.Vector3>;
 }
 
 export interface GroundShadowUniforms {
@@ -388,7 +396,9 @@ export function createCloudPointMaterial(
 		uBaseY: { value: 3.0 },
 		uHeightY: { value: 4.0 },
 		uShadowDither: { value: 0.65 },
-		uDarkMode: { value: 0 }
+		uDarkMode: { value: 0 },
+		uFlashIntensity: { value: 0 },
+		uFlashPos: { value: new THREE.Vector3(0, 4, 0) }
 	};
 
 	const material = new THREE.ShaderMaterial({

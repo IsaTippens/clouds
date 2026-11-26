@@ -19,6 +19,8 @@ import {
 } from './shaders';
 import { createWindSystem } from './wind';
 import { createRainSystem, type RainStatus } from './rain';
+import { createLightningSystem, type LightningStatus } from './lightning';
+import { createTornadoSystem, type TornadoStatus } from './tornado';
 import { createAirTrafficSystem, type TrafficStatus } from './traffic';
 
 export type CameraPreset = 'iso' | 'top' | 'side' | 'low';
@@ -391,11 +393,19 @@ export function createCloudViewport(
 	bindCloudFieldToGeometry(cloudField);
 	syncUniforms(currentParams, meteo, cloudUniforms, groundUniforms);
 
-	// Atmospheric & air-traffic subsystems (wind streamlines, rain curtains/splashes, aircraft & birds)
+	// Atmospheric & air-traffic subsystems (wind streamlines, rain/snow, lightning, tornado, aircraft & birds)
 	const windSystem = createWindSystem(scene);
 	const rainSystem = createRainSystem(scene);
+	const lightningSystem = createLightningSystem(scene);
+	const tornadoSystem = createTornadoSystem(scene);
 	const airTrafficSystem = createAirTrafficSystem(scene);
-	let rainStatus: RainStatus = { rainActive: false, rainRateMmHr: 0 };
+	let rainStatus: RainStatus = { rainActive: false, rainRateMmHr: 0, precipPhase: 'dry' };
+	let lightningStatus: LightningStatus = {
+		lightningActive: false,
+		flashIntensity: 0,
+		flashPos: [0, 4, 0]
+	};
+	let tornadoStatus: TornadoStatus = { tornadoActive: false, funnelStrength: 0 };
 	let trafficStatus: TrafficStatus = { aircraftCount: 0, birdCount: 0 };
 
 	// Sizing & ResizeObserver
@@ -450,6 +460,9 @@ export function createCloudViewport(
 			fps: Math.round(measuredFps),
 			rainActive: rainStatus.rainActive,
 			rainRateMmHr: rainStatus.rainRateMmHr,
+			precipPhase: rainStatus.precipPhase,
+			lightningActive: lightningStatus.lightningActive,
+			tornadoActive: tornadoStatus.tornadoActive,
 			aircraftCount: trafficStatus.aircraftCount,
 			birdCount: trafficStatus.birdCount
 		});
@@ -459,6 +472,7 @@ export function createCloudViewport(
 	{
 		const cloudBaseY = cloudField.bounds.baseY;
 		const cloudTopY = cloudField.bounds.baseY + cloudField.bounds.heightY;
+		const overheadFactor = cloudField.getOverheadCloudFactor();
 		windSystem.update(0, 0, currentParams);
 		rainStatus = rainSystem.update(
 			0,
@@ -467,7 +481,31 @@ export function createCloudViewport(
 			cloudBaseY,
 			meteo.dominantType,
 			cloudField.sampleRainColumn,
-			cloudField.getOverheadCloudFactor()
+			overheadFactor
+		);
+		lightningStatus = lightningSystem.update(
+			0,
+			0,
+			currentParams,
+			cloudBaseY,
+			meteo.dominantType,
+			cloudField.sampleRainColumn,
+			overheadFactor
+		);
+		tornadoStatus = tornadoSystem.update(
+			0,
+			0,
+			currentParams,
+			cloudBaseY,
+			meteo.dominantType,
+			cloudField.sampleRainColumn,
+			overheadFactor
+		);
+		cloudUniforms.uFlashIntensity.value = lightningStatus.flashIntensity;
+		cloudUniforms.uFlashPos.value.set(
+			lightningStatus.flashPos[0],
+			lightningStatus.flashPos[1],
+			lightningStatus.flashPos[2]
 		);
 		trafficStatus = airTrafficSystem.update(0, 0, currentParams, cloudBaseY, cloudTopY);
 	}
@@ -522,9 +560,10 @@ export function createCloudViewport(
 			groundUniforms.uWindOffset.value.set(cloudField.subOffsetX, cloudField.subOffsetZ);
 		}
 
-		// Update wind currents, localized rain events under clouds, and air traffic every frame
+		// Update wind currents, localized rain/snow, severe weather (lightning & tornado), and air traffic every frame
 		const cloudBaseY = cloudField.bounds.baseY;
 		const cloudTopY = cloudField.bounds.baseY + cloudField.bounds.heightY;
+		const overheadFactor = cloudField.getOverheadCloudFactor();
 		windSystem.update(dt, simTime, currentParams);
 		rainStatus = rainSystem.update(
 			dt,
@@ -533,7 +572,31 @@ export function createCloudViewport(
 			cloudBaseY,
 			meteo.dominantType,
 			cloudField.sampleRainColumn,
-			cloudField.getOverheadCloudFactor()
+			overheadFactor
+		);
+		lightningStatus = lightningSystem.update(
+			dt,
+			simTime,
+			currentParams,
+			cloudBaseY,
+			meteo.dominantType,
+			cloudField.sampleRainColumn,
+			overheadFactor
+		);
+		tornadoStatus = tornadoSystem.update(
+			dt,
+			simTime,
+			currentParams,
+			cloudBaseY,
+			meteo.dominantType,
+			cloudField.sampleRainColumn,
+			overheadFactor
+		);
+		cloudUniforms.uFlashIntensity.value = lightningStatus.flashIntensity;
+		cloudUniforms.uFlashPos.value.set(
+			lightningStatus.flashPos[0],
+			lightningStatus.flashPos[1],
+			lightningStatus.flashPos[2]
 		);
 		trafficStatus = airTrafficSystem.update(dt, simTime, currentParams, cloudBaseY, cloudTopY);
 
@@ -607,6 +670,8 @@ export function createCloudViewport(
 		stencilGrid.dispose();
 		windSystem.dispose();
 		rainSystem.dispose();
+		lightningSystem.dispose();
+		tornadoSystem.dispose();
 		airTrafficSystem.dispose();
 		renderer.dispose();
 	}

@@ -61,6 +61,14 @@
 		appState.params.rainMode = mode;
 	}
 
+	function setLightningMode(mode: RainMode) {
+		appState.params.lightningMode = mode;
+	}
+
+	function setTornadoMode(mode: RainMode) {
+		appState.params.tornadoMode = mode;
+	}
+
 	function handleSeedInput(event: Event) {
 		const target = event.currentTarget as HTMLInputElement;
 		const parsed = parseInt(target.value, 10);
@@ -447,8 +455,8 @@
 						/>
 					{/if}
 
-					<div class="sub-label">RAIN EVENTS</div>
-					<div class="segmented segmented-3" role="group" aria-label="Rain event mode">
+					<div class="sub-label">RAIN / SNOW (&lt; 0°C)</div>
+					<div class="segmented segmented-3" role="group" aria-label="Rain or snow precipitation mode">
 						{#each RAIN_MODES as mode}
 							<button
 								type="button"
@@ -462,7 +470,7 @@
 					</div>
 
 					<StencilSlider
-						label="Rain Intensity"
+						label="Precip Intensity"
 						bind:value={appState.params.rainIntensity}
 						min={0}
 						max={1}
@@ -470,6 +478,34 @@
 						ticks={9}
 						formatValue={formatPercent}
 					/>
+
+					<div class="sub-label">THUNDERSTORM / LIGHTNING</div>
+					<div class="segmented segmented-3" role="group" aria-label="Thunderstorm lightning mode">
+						{#each RAIN_MODES as mode}
+							<button
+								type="button"
+								class="stencil-btn seg-btn"
+								class:is-active={appState.params.lightningMode === mode.id}
+								onclick={() => setLightningMode(mode.id)}
+							>
+								{mode.label}
+							</button>
+						{/each}
+					</div>
+
+					<div class="sub-label">TORNADO VORTEX</div>
+					<div class="segmented segmented-3" role="group" aria-label="Tornado vortex mode">
+						{#each RAIN_MODES as mode}
+							<button
+								type="button"
+								class="stencil-btn seg-btn"
+								class:is-active={appState.params.tornadoMode === mode.id}
+								onclick={() => setTornadoMode(mode.id)}
+							>
+								{mode.label}
+							</button>
+						{/each}
+					</div>
 
 					<div class="sub-label">AIR TRAFFIC</div>
 					<div class="toggle-list">

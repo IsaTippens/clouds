@@ -14,6 +14,8 @@ export type ThemePreference = 'auto' | SurfaceMode;
 
 export type RainMode = 'auto' | 'on' | 'off';
 
+export type PrecipPhase = 'dry' | 'rain' | 'snow';
+
 export interface CloudParams {
 	// Time
 	/** Local solar time in hours (0..24) */
@@ -70,6 +72,10 @@ export interface CloudParams {
 	rainMode: RainMode;
 	/** Rain rate intensity scale (0..1) */
 	rainIntensity: number;
+	/** Thunderstorm lightning simulation mode */
+	lightningMode: RainMode;
+	/** Tornado vortex simulation mode */
+	tornadoMode: RainMode;
 	/** Render high-altitude aircraft with contrails */
 	showPlanes: boolean;
 	/** Render low-altitude helicopters */
@@ -90,6 +96,9 @@ export interface CloudTelemetry {
 	fps: number;
 	rainActive: boolean;
 	rainRateMmHr: number;
+	precipPhase: PrecipPhase;
+	lightningActive: boolean;
+	tornadoActive: boolean;
 	aircraftCount: number;
 	birdCount: number;
 }

@@ -180,10 +180,14 @@
 				<div class="tele-grid-extras tabular">
 					<div class="tele-stat">
 						<span class="stat-label">PRECIP</span>
-						<span class="stat-val" class:is-precip-active={appState.telemetry.rainActive}>
-							{appState.telemetry.rainActive
-								? `${appState.telemetry.rainRateMmHr.toFixed(1)} mm/h`
-								: 'DRY'}
+						<span class="stat-val" class:is-precip-active={appState.telemetry.precipPhase !== 'dry'}>
+							{#if appState.telemetry.precipPhase === 'snow'}
+								SNOW {appState.telemetry.rainRateMmHr.toFixed(1)} cm/h
+							{:else if appState.telemetry.precipPhase === 'rain'}
+								{appState.telemetry.rainRateMmHr.toFixed(1)} mm/h
+							{:else}
+								DRY
+							{/if}
 						</span>
 					</div>
 					<div class="tele-stat">
@@ -195,6 +199,17 @@
 						<span class="stat-val">{appState.telemetry.birdCount}</span>
 					</div>
 				</div>
+
+				{#if appState.telemetry.lightningActive || appState.telemetry.tornadoActive}
+					<div class="tele-badges" aria-label="Active severe weather alerts">
+						{#if appState.telemetry.lightningActive}
+							<span class="severe-badge">⚡ STORM</span>
+						{/if}
+						{#if appState.telemetry.tornadoActive}
+							<span class="severe-badge">◎ VORTEX</span>
+						{/if}
+					</div>
+				{/if}
 			</div>
 		</div>
 	</div>
@@ -468,6 +483,29 @@
 		background: var(--surface-invert);
 		color: var(--ink-invert);
 		width: fit-content;
+	}
+
+	.tele-badges {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.36rem;
+		padding-top: 0.34rem;
+		border-top: 1px solid var(--border-subtle);
+	}
+
+	.severe-badge {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.24rem;
+		padding: 0.14rem 0.42rem;
+		background: var(--surface-invert);
+		color: var(--ink-invert);
+		border: 1px solid var(--border);
+		font-size: 0.58rem;
+		font-weight: 700;
+		letter-spacing: 0.12em;
+		line-height: 1.2;
+		white-space: nowrap;
 	}
 
 	.tele-stat {

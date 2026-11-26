@@ -20,6 +20,9 @@
 		appState.telemetry.fps = telemetry.fps;
 		appState.telemetry.rainActive = telemetry.rainActive;
 		appState.telemetry.rainRateMmHr = telemetry.rainRateMmHr;
+		appState.telemetry.precipPhase = telemetry.precipPhase;
+		appState.telemetry.lightningActive = telemetry.lightningActive;
+		appState.telemetry.tornadoActive = telemetry.tornadoActive;
 		appState.telemetry.aircraftCount = telemetry.aircraftCount;
 		appState.telemetry.birdCount = telemetry.birdCount;
 	}
