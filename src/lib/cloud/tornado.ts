@@ -20,6 +20,9 @@ import { clamp, createPrng, lerp, smoothstep } from './noise';
 export interface TornadoStatus {
 	tornadoActive: boolean;
 	funnelStrength: number; // 0..1
+	anchorX: number;
+	anchorZ: number;
+	topY: number;
 }
 
 export interface TornadoSystem {
@@ -105,80 +108,83 @@ void main() {
 		return;
 	}
 
-	// Continuous upward helical draft along normalized column height [0..1]
-	float riseRate = (0.14 + aSeed * 0.13) * (0.75 + 0.45 * uSpinSpeed);
+	// Smooth upward helical draft along the laminar vortex wall [0..1]
+	float riseRate = (0.11 + aSeed * 0.06) * (0.72 + 0.38 * uSpinSpeed);
 	float hRaw = fract(aHeightNorm + uTime * riseRate);
 
-	// Smooth descent from wall cloud (h=1) down to ground (h=0) during formation / rope-out
-	float reach = smoothstep(0.02, 0.72, uFunnelStrength);
+	// Staged tornadogenesis descent:
+	// - Early (strength 0.05..0.50): funnel protrudes down from wall cloud while debris spins up below
+	// - Mature (strength >= 0.62): reach = 1.0 -> complete unbroken funnel connecting wall cloud to ground (y = 0)
+	float reach = smoothstep(0.05, 0.62, uFunnelStrength);
 	float h = mix(1.0 - reach, 1.0, hRaw);
 	float worldY = h * uTopY;
 
-	// Funnel radius profile:
-	// - tight intense vortex tip at ground (r ~ 0.35..0.55)
-	// - graceful curved mid-column taper
-	// - wide flaring wall-cloud collar at top (r ~ 2.4..3.2)
-	float baseTipR = mix(0.34, 0.50, uFunnelStrength);
-	float midTaper = pow(h, 1.75) * 0.88;
-	float wallCollar = pow(smoothstep(0.56, 1.0, h), 2.15) * 1.82;
-	float profileR = baseTipR + midTaper + wallCollar;
+	// Complete sculptural supercell funnel profile:
+	// - defined ground touchdown column (r ~ 0.30..0.48)
+	// - bold, continuous, unbroken mid-column cone
+	// - wide flaring lowered Wall Cloud pedestal merging into cloud base (h > 0.72)
+	float baseTipR = mix(0.28, 0.46, uFunnelStrength);
+	float midTaper = pow(h, 1.38) * 1.02;
+	float wallCloudCollar = pow(smoothstep(0.72, 1.0, h), 1.8) * 1.75;
+	float profileR = baseTipR + midTaper + wallCloudCollar;
 
-	// Narrow into a sinuous rope during formation and dissipation
-	float ropeScale = mix(0.28, 1.0, smoothstep(0.06, 0.82, uFunnelStrength));
+	// Sinuous narrow rope during early formation & late rope-out; full sculpted cone when mature
+	float ropeScale = mix(0.38, 1.0, smoothstep(0.08, 0.72, uFunnelStrength));
 	profileR *= ropeScale;
 
-	// Split particles into dense inner vortex core (aRadialJitter <= 0) & wispy outer sheath (> 0)
-	float isSheath = smoothstep(0.0, 1.0, aRadialJitter);
-	float coreThickness = mix(0.14, 0.45, h);
-	float sheathOffset = isSheath * mix(0.24, 0.78, h) * ropeScale;
-	float r = max(0.06, profileR + aRadialJitter * coreThickness + sheathOffset);
+	// Dense, cohesive laminar Vortex Wall surrounding a hollow low-pressure Core (Eye),
+	// with a thin wispy outer condensation sheath
+	float isSheath = smoothstep(0.30, 1.0, aRadialJitter);
+	float wallThickness = mix(0.055, 0.16, h);
+	float sheathOffset = isSheath * mix(0.12, 0.36, h) * ropeScale;
+	float r = max(0.12, profileR + aRadialJitter * wallThickness + sheathOffset);
 
-	// Fast cyclonic rotation: intense angular velocity near tight ground tip, slower at wide collar
-	float omega = mix(8.6, 1.55, pow(h, 0.58)) * uSpinSpeed;
-	// Braided helical twist along height + subtle suction sub-vortex ripples
-	float angle = aAngle + uTime * omega + h * 5.2;
-	float subVortex = sin(angle * 2.0 - uTime * 3.4 + h * 6.0) * 0.075 * (1.0 - h * 0.5);
-	r += subVortex * ropeScale;
+	// Readable, stately cyclonic rotation: faster near ground touchdown, slower at wall-cloud collar
+	float omega = mix(4.2, 0.85, pow(h, 0.62)) * uSpinSpeed;
+	// Smooth braided helical spiral + subtle orbiting multi-vortex suction ripples when mature
+	float angle = aAngle + uTime * omega + h * 4.4;
+	float matureMask = smoothstep(0.55, 0.95, uFunnelStrength);
+	float suctionVortices = sin(angle * 2.0 - uTime * 2.2 + h * 5.0) * 0.055 * (1.0 - h * 0.55) * matureMask;
+	r += suctionVortices * ropeScale;
 
-	// Organic sinuous S-curve sway along the funnel spine
+	// Graceful elephant-trunk S-curve sway (slow, sculptural, never frantic)
 	float swayEnv = sin(h * 3.14159265) * (0.65 + 0.35 * (1.0 - h));
-	float ropeWhip = mix(1.45, 1.0, smoothstep(0.15, 0.75, uFunnelStrength));
-	float amp = uSwayAmp * swayEnv * ropeWhip;
-	float swayX = sin(h * 3.2 - uTime * 1.4) * amp + cos(h * 5.4 + uTime * 0.95) * amp * 0.32;
-	float swayZ = cos(h * 2.9 - uTime * 1.25 + 1.15) * amp + sin(h * 4.8 - uTime * 1.05) * amp * 0.32;
+	float ropeWhip = mix(1.3, 1.0, smoothstep(0.15, 0.72, uFunnelStrength));
+	float amp = uSwayAmp * 0.68 * swayEnv * ropeWhip;
+	float swayX = sin(h * 2.6 - uTime * 0.62) * amp + cos(h * 4.2 + uTime * 0.45) * amp * 0.2;
+	float swayZ = cos(h * 2.4 - uTime * 0.56 + 1.15) * amp + sin(h * 3.8 - uTime * 0.48) * amp * 0.2;
 
-	// Slight downwind tilt with altitude
-	vec2 lean = uWindDir * (pow(h, 1.35) * uWindLean);
+	// Gentle downwind tilt with altitude (vertical wind shear signature)
+	vec2 lean = uWindDir * (pow(h, 1.35) * uWindLean * 0.8);
 
 	vec3 pos;
 	pos.x = uAnchorXZ.x + lean.x + swayX + cos(angle) * r;
 	pos.y = worldY;
 	pos.z = uAnchorXZ.y + lean.y + swayZ + sin(angle) * r;
 
-	// Directional cylindrical shading so the monochrome column reads with sculptural 3D volume
-	vec3 radialNorm = normalize(vec3(cos(angle), 0.25 * h, sin(angle)));
+	// Directional cylindrical shading so the monochrome funnel reads as a smooth sculpted cone
+	vec3 radialNorm = normalize(vec3(cos(angle), 0.22 * h, sin(angle)));
 	vec3 keyDir = normalize(vec3(0.55, 0.52, 0.65));
 	float cylShade = dot(radialNorm, keyDir) * 0.5 + 0.5;
-	// Dense lower-mid core is deeper/higher contrast; top wall collar blends smoothly into cloud base
-	float coreContrast = mix(0.22, 0.88, cylShade) * mix(0.82, 1.08, h);
+	float coreContrast = mix(0.24, 0.92, cylShade) * mix(0.86, 1.06, h);
 
-	// Softly fade particles at the very bottom wrap and top wall-cloud merge
-	float endFade = smoothstep(0.0, 0.04, hRaw) * (1.0 - smoothstep(0.93, 1.0, hRaw));
-	float strengthFade = smoothstep(0.01, 0.28, uFunnelStrength);
+	// Keep the full column unbroken from y=0 to wall cloud (only feather the very top cloud merge)
+	float endFade = smoothstep(0.0, 0.02, hRaw) * (1.0 - smoothstep(0.95, 1.0, hRaw));
+	float strengthFade = smoothstep(0.02, 0.24, uFunnelStrength);
 
 	vHeight = h;
 	vSheath = isSheath;
 	vShade = clamp(coreContrast, 0.0, 1.0);
 	vSeed = aSeed;
-	vAlpha = endFade * strengthFade * mix(0.96, 0.62, isSheath);
+	vAlpha = endFade * strengthFade * mix(0.98, 0.58, isSheath);
 
 	vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
 	gl_Position = projectionMatrix * mvPosition;
 
 	float dist = max(-mvPosition.z, 1.5);
-	float sizeScale = mix(0.76, 1.28, pow(h, 1.2)) * mix(1.0, 1.18, isSheath);
-	float sizePx = uPointSize * aSize * sizeScale * uPixelRatio * (33.0 / dist);
-	gl_PointSize = clamp(sizePx * (0.55 + 0.45 * strengthFade), 1.2, 24.0);
+	float sizeScale = mix(0.95, 1.32, pow(h, 1.1)) * mix(1.08, 1.18, isSheath);
+	float sizePx = uPointSize * aSize * sizeScale * uPixelRatio * (35.0 / dist);
+	gl_PointSize = clamp(sizePx * (0.62 + 0.38 * strengthFade), 1.6, 26.0);
 }
 `;
 
@@ -209,9 +215,11 @@ void main() {
 	float dotMask = 1.0 - smoothstep(dotRadius - 0.24, dotRadius, r);
 	if (dotMask <= 0.02) discard;
 
-	// Ordered Bayer stipple dropout on airy outer sheath & upper collar edge
-	float sheathCut = vAlpha * mix(1.0, 0.68, vSheath);
-	if (sheathCut < stipple * (0.28 + uShadowDither * 0.38)) discard;
+	// Keep the primary laminar Vortex Wall solid & unbroken; apply Bayer stipple dropout only to outer sheath
+	if (vSheath > 0.25) {
+		float sheathCut = vAlpha * mix(1.0, 0.64, vSheath);
+		if (sheathCut < stipple * (0.24 + uShadowDither * 0.34)) discard;
+	}
 
 	float ditheredShade = clamp(vShade + (bayer - 0.5) * (0.16 + uShadowDither * 0.28), 0.0, 1.0);
 	float stepped = mix(ditheredShade, floor(ditheredShade * 4.0 + 0.5) / 4.0, uShadowDither * 0.4);
@@ -272,32 +280,35 @@ void main() {
 		return;
 	}
 
-	// Continuous outward & upward whipping debris cycle
-	float cycleSpeed = (0.38 + aSeed * 0.44) * (0.7 + 0.45 * uSpinSpeed);
+	// Corner Flow (Inflow Layer) -> Swirling Ground Debris Collar:
+	// Surface friction pulls air radially INWARD across the ground before turning sharply UPWARD
+	// into the vortex wall, lifting a compact swirling debris cloud at ground contact.
+	float cycleSpeed = (0.28 + aSeed * 0.26) * (0.72 + 0.38 * uSpinSpeed);
 	float life = fract(aHeightSeed + uTime * cycleSpeed);
 
-	// Whip outward from tight touchdown base (0.35..0.85) to wide swirling collar (1.4..3.1)
-	float startR = 0.34 + aRadiusNorm * 0.52;
-	float endR = 1.35 + aRadiusNorm * 1.85;
-	float r = mix(startR, endR, pow(life, 0.72));
+	// Phase 1 (0..0.42): low radial inflow rushing inward from r = 2.8 -> 0.42 along the ground
+	// Phase 2 (0.42..1.0): sharp upward turn & helical lift into the swirling debris collar
+	float inflowT = smoothstep(0.0, 0.45, life);
+	float liftT = smoothstep(0.38, 1.0, life);
 
-	// Rise rapidly from y = 0.05 up to ~1.5 then arc slightly outward/downward
-	float arc = sin(life * 3.14159265);
-	float peakY = mix(0.45, 1.52, fract(aSeed * 7.13));
-	float y = 0.05 + pow(arc, 0.85) * peakY * (0.45 + 0.55 * uTouchdown);
+	float outerStartR = 1.65 + aRadiusNorm * 1.55;
+	float cornerR = 0.32 + aRadiusNorm * 0.45;
+	float loftEndR = 0.72 + aRadiusNorm * 0.95;
+	float r = mix(mix(outerStartR, cornerR, inflowT), loftEndR, liftT);
 
-	// High-speed cyclonic spin near touchdown, slowing slightly as debris flings outward
-	float omega = mix(9.4, 3.2, aRadiusNorm) * uSpinSpeed;
-	float angle = aAngle + uTime * omega + life * 4.5;
+	float peakY = mix(0.55, 1.45, fract(aSeed * 7.13));
+	float y = 0.05 + pow(liftT, 1.15) * peakY * (0.45 + 0.55 * uTouchdown);
 
-	// Subtle turbulent vertical/radial jitter
-	float flutter = sin(uTime * 5.2 + aSeed * 25.0) * 0.08;
+	// Smooth cyclonic spin accelerating as air converges into the corner flow
+	float omega = mix(4.8, 1.8, aRadiusNorm) * uSpinSpeed;
+	float angle = aAngle + uTime * omega + life * 3.6;
+
 	vec3 pos;
-	pos.x = uAnchorXZ.x + cos(angle) * (r + flutter);
-	pos.y = max(0.05, y + cos(uTime * 4.7 + aSeed * 19.0) * 0.04);
-	pos.z = uAnchorXZ.y + sin(angle) * (r - flutter);
+	pos.x = uAnchorXZ.x + cos(angle) * r;
+	pos.y = max(0.05, y);
+	pos.z = uAnchorXZ.y + sin(angle) * r;
 
-	float lifeFade = smoothstep(0.0, 0.14, life) * (1.0 - smoothstep(0.68, 1.0, life));
+	float lifeFade = smoothstep(0.0, 0.14, life) * (1.0 - smoothstep(0.72, 1.0, life));
 
 	vLife = life;
 	vSeed = aSeed;
@@ -595,57 +606,47 @@ export function createTornadoSystem(scene: THREE.Scene): TornadoSystem {
 	let vortexClock = 0;
 	let funnelStrength = 0;
 	let hasAnchor = false;
+	let ropingOut = false;
 	let anchorX = 0;
 	let anchorZ = 0;
-	let targetAnchorX = 0;
-	let targetAnchorZ = 0;
 	let anchorTopY = 3.4;
-	let reanchorCooldown = 0;
 
-	function sampleAnchor(
+	function spawnUpwindAnchor(
 		sampleRainColumn: RainColumnSampler | undefined,
 		fallbackBaseY: number,
-		snapImmediately: boolean
+		dirX: number,
+		dirZ: number,
+		preferUpwind: boolean
 	): void {
-		let foundX = 0;
-		let foundZ = 0;
-		let foundY = Math.max(2.3, fallbackBaseY + 0.3);
-		let found = false;
+		let foundX = -dirX * (preferUpwind ? 4.8 : 1.2) + (rand() - 0.5) * 3.0;
+		let foundZ = -dirZ * (preferUpwind ? 4.8 : 1.2) + (rand() - 0.5) * 3.0;
+		let foundY = Math.max(2.6, fallbackBaseY + 0.85);
 
 		if (sampleRainColumn) {
-			// Try up to 4 samples to prefer a dense overhead cloud column well inside the rim
-			for (let attempt = 0; attempt < 4; attempt++) {
-				const col = sampleRainColumn(rand, 0.25);
+			// Pick the best dense cloud column, preferring upwind half when reforming so it travels cleanly across the sky
+			let bestScore = -1e9;
+			for (let attempt = 0; attempt < 8; attempt++) {
+				const col = sampleRainColumn(rand, 0.26);
 				if (!col) break;
 				const r = Math.hypot(col.x, col.z);
-				if (r <= MAX_ANCHOR_RADIUS - 0.8 || attempt === 3) {
-					const scale = r > MAX_ANCHOR_RADIUS - 0.5 ? (MAX_ANCHOR_RADIUS - 0.5) / r : 1.0;
-					foundX = col.x * scale;
-					foundZ = col.z * scale;
-					foundY = Math.max(2.3, (col.y || fallbackBaseY) + 0.35);
-					found = true;
-					break;
+				if (r > MAX_ANCHOR_RADIUS - 1.0) continue;
+				const alongWind = col.x * dirX + col.z * dirZ;
+				const upwindScore = preferUpwind ? -alongWind * 0.45 : -Math.abs(alongWind) * 0.25;
+				const score = col.density * 2.0 + upwindScore;
+				if (score > bestScore) {
+					bestScore = score;
+					foundX = col.x;
+					foundZ = col.z;
+					foundY = Math.max(2.6, (col.y || fallbackBaseY) + 0.85);
 				}
 			}
 		}
 
-		if (!found) {
-			const theta = rand() * Math.PI * 2;
-			const r = rand() * 2.4;
-			foundX = Math.cos(theta) * r;
-			foundZ = Math.sin(theta) * r;
-		}
-
-		targetAnchorX = foundX;
-		targetAnchorZ = foundZ;
-		if (snapImmediately) {
-			anchorX = foundX;
-			anchorZ = foundZ;
-			anchorTopY = foundY;
-		} else {
-			anchorTopY = lerp(anchorTopY, foundY, 0.25);
-		}
+		anchorX = foundX;
+		anchorZ = foundZ;
+		anchorTopY = foundY;
 		hasAnchor = true;
+		ropingOut = false;
 	}
 
 	function computeTargetStrength(
@@ -686,7 +687,10 @@ export function createTornadoSystem(scene: THREE.Scene): TornadoSystem {
 
 	const statusOut: TornadoStatus = {
 		tornadoActive: false,
-		funnelStrength: 0
+		funnelStrength: 0,
+		anchorX: 0,
+		anchorZ: 0,
+		topY: 3.5
 	};
 
 	function update(
@@ -703,30 +707,49 @@ export function createTornadoSystem(scene: THREE.Scene): TornadoSystem {
 		const simDt = params.paused ? 0 : dt * params.timeSpeed;
 		vortexClock += simDt;
 
-		const targetStrength = computeTargetStrength(
+		const windRad = (params.windDirection * Math.PI) / 180;
+		const dirX = Math.sin(windRad);
+		const dirZ = -Math.cos(windRad);
+		const safeBaseY = Math.max(3.6, cloudBaseY + 0.55);
+
+		const rawTargetStrength = computeTargetStrength(
 			params,
 			dominantType,
 			overheadCloudFactor,
 			vortexClock
 		);
 
-		// Smooth descent / rope-out lifecycle (instant response when toggled while paused)
+		// When a tornado drifts past the downwind rim, rope it out smoothly instead of rushing it across the ground!
+		if (hasAnchor && Math.hypot(anchorX, anchorZ) > MAX_ANCHOR_RADIUS) {
+			ropingOut = true;
+		}
+
+		const targetStrength = ropingOut ? 0 : rawTargetStrength;
+
+		// Smooth formation / rope-out lifecycle (instant response when toggled while paused)
 		if (params.paused) {
-			funnelStrength = targetStrength;
+			funnelStrength = rawTargetStrength;
+			ropingOut = false;
 		} else {
 			const forming = targetStrength > funnelStrength;
-			const rate = forming ? (mode === 'on' ? 1.85 : 0.72) : 0.62;
+			const rate = forming ? (mode === 'on' ? 0.95 : 0.65) : 0.72;
 			funnelStrength += (targetStrength - funnelStrength) * Math.min(1, dt * rate);
-			if (targetStrength === 0 && funnelStrength < 0.004) {
+			if (targetStrength === 0 && funnelStrength < 0.008) {
 				funnelStrength = 0;
+				if (ropingOut) {
+					// Fully roped out: silently re-anchor upwind under the next storm cell so a fresh tornado forms
+					hasAnchor = false;
+					ropingOut = false;
+				}
 			}
 		}
 
 		const tornadoActive = funnelStrength > 0.015;
 
-		if (!tornadoActive && targetStrength <= 0.005) {
+		if (!tornadoActive && rawTargetStrength <= 0.005) {
 			group.visible = false;
 			hasAnchor = false;
+			ropingOut = false;
 			statusOut.tornadoActive = false;
 			statusOut.funnelStrength = 0;
 			return statusOut;
@@ -734,47 +757,22 @@ export function createTornadoSystem(scene: THREE.Scene): TornadoSystem {
 
 		group.visible = true;
 
-		// Anchor underneath a dense overhead cloud column on initial formation
-		const safeBaseY = Math.max(2.2, cloudBaseY + 0.35);
+		// Spawn smoothly under a dense overhead storm core when forming a new tornado
 		if (!hasAnchor) {
-			sampleAnchor(sampleRainColumn, safeBaseY, true);
-			reanchorCooldown = 10.0;
+			spawnUpwindAnchor(sampleRainColumn, safeBaseY, dirX, dirZ, vortexClock > 1.0);
 		}
 
-		// Gently wander with the wind & smoothly re-anchor if drifting near the circular rim
-		const windRad = (params.windDirection * Math.PI) / 180;
-		const dirX = Math.sin(windRad);
-		const dirZ = -Math.cos(windRad);
-
+		// Continuous natural ground travel locked smoothly to the parent supercell's wind drift
+		// (NEVER rushes or jumps sideways to a new spot mid-life)
 		if (simDt > 0) {
-			const wanderSpeed = Math.max(0.14, params.windSpeed * 0.028);
-			const meanderX = Math.sin(vortexClock * 0.29 + 0.5) * 0.16;
-			const meanderZ = Math.cos(vortexClock * 0.23 - 0.9) * 0.16;
+			const cloudDriftSpeed = Math.max(0.28, params.windSpeed * 0.052);
+			const perpX = -dirZ;
+			const perpZ = dirX;
+			const lateralSway = Math.sin(vortexClock * 0.34 + 0.7) * 0.24;
 
-			targetAnchorX += (dirX * wanderSpeed + meanderX) * simDt;
-			targetAnchorZ += (dirZ * wanderSpeed + meanderZ) * simDt;
-
-			reanchorCooldown -= simDt;
-			const distFromCenter = Math.hypot(targetAnchorX, targetAnchorZ);
-			if (distFromCenter > MAX_ANCHOR_RADIUS || reanchorCooldown <= 0) {
-				if (distFromCenter > MAX_ANCHOR_RADIUS) {
-					sampleAnchor(sampleRainColumn, safeBaseY, false);
-				} else if (sampleRainColumn) {
-					// Subtle periodic pull toward an active dense cloud core
-					const col = sampleRainColumn(rand, 0.25);
-					if (col && Math.hypot(col.x, col.z) < MAX_ANCHOR_RADIUS - 0.8) {
-						targetAnchorX = lerp(targetAnchorX, col.x, 0.35);
-						targetAnchorZ = lerp(targetAnchorZ, col.z, 0.35);
-					}
-				}
-				reanchorCooldown = 9.0 + rand() * 5.0;
-			}
-
-			// Smoothly steer live anchor toward target anchor (never teleports)
-			const followAlpha = Math.min(1, simDt * 0.65);
-			anchorX += (targetAnchorX - anchorX) * followAlpha;
-			anchorZ += (targetAnchorZ - anchorZ) * followAlpha;
-			anchorTopY += (safeBaseY - anchorTopY) * Math.min(1, simDt * 1.4);
+			anchorX += (dirX * cloudDriftSpeed + perpX * lateralSway) * simDt;
+			anchorZ += (dirZ * cloudDriftSpeed + perpZ * lateralSway) * simDt;
+			anchorTopY += (safeBaseY - anchorTopY) * Math.min(1, simDt * 1.2);
 		} else {
 			anchorTopY = lerp(anchorTopY, safeBaseY, 0.15);
 		}
@@ -785,7 +783,9 @@ export function createTornadoSystem(scene: THREE.Scene): TornadoSystem {
 		const spinSpeed = 0.75 + clamp(params.windSpeed / 40, 0, 1) * 0.55 + params.turbulence * 0.35;
 		const swayAmp = 0.24 + params.turbulence * 0.28;
 		const windLean = clamp(params.windSpeed / 40, 0, 1) * 0.72;
-		const touchdown = smoothstep(0.32, 0.8, funnelStrength);
+		// Per meteorological visibility principle: ground-contact rotation & debris cloud appear
+		// slightly BEFORE the condensation funnel finishes descending to the surface
+		const touchdown = smoothstep(0.14, 0.58, funnelStrength);
 
 		// Update funnel uniforms
 		funnelUniforms.uTime.value = vortexClock;
@@ -819,6 +819,9 @@ export function createTornadoSystem(scene: THREE.Scene): TornadoSystem {
 
 		statusOut.tornadoActive = tornadoActive;
 		statusOut.funnelStrength = funnelStrength;
+		statusOut.anchorX = anchorX;
+		statusOut.anchorZ = anchorZ;
+		statusOut.topY = anchorTopY;
 		return statusOut;
 	}
 

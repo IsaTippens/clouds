@@ -405,7 +405,13 @@ export function createCloudViewport(
 		flashIntensity: 0,
 		flashPos: [0, 4, 0]
 	};
-	let tornadoStatus: TornadoStatus = { tornadoActive: false, funnelStrength: 0 };
+	let tornadoStatus: TornadoStatus = {
+		tornadoActive: false,
+		funnelStrength: 0,
+		anchorX: 0,
+		anchorZ: 0,
+		topY: 3.5
+	};
 	let trafficStatus: TrafficStatus = { aircraftCount: 0, birdCount: 0 };
 
 	// Sizing & ResizeObserver
@@ -436,6 +442,7 @@ export function createCloudViewport(
 
 	// Simulation, debounced rebuild, & telemetry state
 	let simTime = 0;
+	let tornadoSpinPhase = 0;
 	let geometryDirty = false;
 	let lastRebuildAt = performance.now();
 
@@ -561,10 +568,36 @@ export function createCloudViewport(
 		}
 
 		// Update wind currents, localized rain/snow, severe weather (lightning & tornado), and air traffic every frame
+		// Update tornado first so wind currents and air traffic react to its live vortex field
 		const cloudBaseY = cloudField.bounds.baseY;
 		const cloudTopY = cloudField.bounds.baseY + cloudField.bounds.heightY;
 		const overheadFactor = cloudField.getOverheadCloudFactor();
-		windSystem.update(dt, simTime, currentParams);
+		tornadoStatus = tornadoSystem.update(
+			dt,
+			simTime,
+			currentParams,
+			cloudBaseY,
+			meteo.dominantType,
+			cloudField.sampleRainColumn,
+			overheadFactor
+		);
+		if (!currentParams.paused) {
+			tornadoSpinPhase += dt * currentParams.timeSpeed * tornadoStatus.funnelStrength * 0.55;
+		}
+		cloudUniforms.uTornadoPos.value.set(
+			tornadoStatus.anchorX,
+			tornadoStatus.topY,
+			tornadoStatus.anchorZ
+		);
+		cloudUniforms.uTornadoStrength.value = tornadoStatus.funnelStrength;
+		cloudUniforms.uTornadoPhase.value = tornadoSpinPhase;
+		groundUniforms.uTornadoPos.value.set(
+			tornadoStatus.anchorX,
+			tornadoStatus.topY,
+			tornadoStatus.anchorZ
+		);
+		groundUniforms.uTornadoStrength.value = tornadoStatus.funnelStrength;
+		windSystem.update(dt, simTime, currentParams, tornadoStatus);
 		rainStatus = rainSystem.update(
 			dt,
 			simTime,
@@ -583,22 +616,20 @@ export function createCloudViewport(
 			cloudField.sampleRainColumn,
 			overheadFactor
 		);
-		tornadoStatus = tornadoSystem.update(
-			dt,
-			simTime,
-			currentParams,
-			cloudBaseY,
-			meteo.dominantType,
-			cloudField.sampleRainColumn,
-			overheadFactor
-		);
 		cloudUniforms.uFlashIntensity.value = lightningStatus.flashIntensity;
 		cloudUniforms.uFlashPos.value.set(
 			lightningStatus.flashPos[0],
 			lightningStatus.flashPos[1],
 			lightningStatus.flashPos[2]
 		);
-		trafficStatus = airTrafficSystem.update(dt, simTime, currentParams, cloudBaseY, cloudTopY);
+		trafficStatus = airTrafficSystem.update(
+			dt,
+			simTime,
+			currentParams,
+			cloudBaseY,
+			cloudTopY,
+			tornadoStatus
+		);
 
 		// Smooth camera preset animation
 		if (camTransition) {

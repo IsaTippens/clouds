@@ -52,6 +52,9 @@ uniform float uBaseY;
 uniform float uHeightY;
 uniform float uFlashIntensity;
 uniform vec3 uFlashPos;
+uniform vec3 uTornadoPos;
+uniform float uTornadoStrength;
+uniform float uTornadoPhase;
 
 varying float vLight;
 varying float vDensity;
@@ -87,6 +90,62 @@ void main() {
 	// Smooth radial horizon fade so new clouds materialize & exit gently at the circular rim
 	float radial = length(pos.xz) / uHalfExtentXZ;
 	vEdgeFade = 1.0 - smoothstep(0.78, 1.0, radial);
+
+	// Real-time supercell mesocyclone morphology:
+	// - Stately, coherent mesocyclone rotation in lower-mid updraft (upper anvil stays intact)
+	// - Lowered dark Wall Cloud pedestal beneath the rain-free base (recycled humid air -> lower LCL)
+	// - Crescent RFD (Rear-Flank Downdraft) Clear Slot where dry sinking air evaporates droplets
+	// - Tight calm hollow eye only inside the lower funnel core
+	if (uTornadoStrength > 0.01) {
+		vec2 relXZ = pos.xz - uTornadoPos.xz;
+		float r = length(relXZ);
+		float mesoRadius = 9.2;
+
+		if (r < mesoRadius) {
+			// Mesocyclone affects lower-to-mid cloud; upper anvil & overshooting top remain serene
+			float lowerMidMask = 1.0 - smoothstep(0.28, 0.76, aHeightNorm);
+			float outerMask = 1.0 - smoothstep(1.2, mesoRadius, r);
+			float wallMask = 1.0 - smoothstep(1.4, 4.8, r);
+			float strength = uTornadoStrength * lowerMidMask;
+
+			// 1. Gradual, cumulative mesocyclone rotation driven by integrated uTornadoPhase
+			//    (zero instantaneous snap when tornado forms, regardless of elapsed uTime!)
+			float spinAngle = uTornadoPhase * (outerMask * 0.45 + wallMask * 0.75) * lowerMidMask;
+			float cs = cos(spinAngle);
+			float sn = sin(spinAngle);
+			vec2 spunXZ = vec2(
+				relXZ.x * cs - relXZ.y * sn,
+				relXZ.x * sn + relXZ.y * cs
+			);
+			pos.xz = uTornadoPos.xz + spunXZ;
+
+			// 2. Lowered Wall Cloud pedestal directly above the funnel collar (subtle drop so funnel stays clearly visible)
+			float baseOnly = 1.0 - smoothstep(0.0, 0.38, aHeightNorm);
+			float pedestalShape = 1.0 - smoothstep(1.6, 4.6, r);
+			float wallDrop = pedestalShape * baseOnly * uTornadoStrength * 0.65;
+			pos.y = max(1.8, pos.y - wallDrop);
+
+			// 3. Tight hollow low-pressure eye at the base of the wall cloud (pushes particles into eyewall)
+			float funnelEyeR = mix(0.0, 0.78, smoothstep(0.2, 0.85, uTornadoStrength)) * baseOnly;
+			if (funnelEyeR > 0.05 && r < funnelEyeR * 1.6) {
+				vec2 dirOut = spunXZ / max(length(spunXZ), 0.001);
+				float eyePush = 1.0 - smoothstep(funnelEyeR * 0.35, funnelEyeR * 1.6, r);
+				float pushedR = mix(r, funnelEyeR * (1.1 + aSeed * 0.22), eyePush * uTornadoStrength);
+				pos.xz = uTornadoPos.xz + dirOut * pushedR;
+				vEdgeFade *= mix(1.0, smoothstep(funnelEyeR * 0.55, funnelEyeR * 1.05, pushedR), uTornadoStrength);
+			}
+
+			// 4. RFD Clear Slot: curved dry-air notch wrapping around the rear flank of the wall cloud
+			vec2 windDir = normalize(length(uWindOffset) > 0.0001 ? uWindOffset : vec2(-0.6, 0.8));
+			vec2 dirFromCenter = spunXZ / max(length(spunXZ), 0.001);
+			// Rear-flank arc (behind and curving clockwise around the wall cloud)
+			float rearAlign = dot(dirFromCenter, -windDir * 0.8 + vec2(windDir.y, -windDir.x) * 0.6);
+			float slotArc = smoothstep(0.28, 0.78, rearAlign);
+			float slotBand = smoothstep(1.8, 3.1, r) * (1.0 - smoothstep(4.2, 6.2, r));
+			float clearSlot = slotArc * slotBand * lowerMidMask * uTornadoStrength;
+			vEdgeFade *= (1.0 - clearSlot * 0.82);
+		}
+	}
 
 	// Real-time 3D volumetric raymarch toward live uSunDir through the streaming cloud volume
 	vec3 sunDir = normalize(uSunDir);
@@ -236,6 +295,9 @@ uniform float uShadowDither;
 uniform float uDarkMode;
 uniform float uSunElevNorm;
 uniform float uSunShadowStrength;
+uniform vec3 uTornadoPos;
+uniform float uTornadoStrength;
+uniform float uTornadoPhase;
 
 varying vec2 vWorldXZ;
 
@@ -301,6 +363,22 @@ void main() {
 		vec2 sampleUv = (p.xz - uWindOffset + uHalfExtentXZ) / spanXZ;
 		if (sampleUv.x < 0.0 || sampleUv.x > 1.0 || sampleUv.y < 0.0 || sampleUv.y > 1.0) continue;
 		float d = sampleVolume3D(uVolumeAtlas, vec3(sampleUv.x, ny, sampleUv.y));
+
+		// Carve matching RFD Clear Slot notch in the 3D raymarched ground shadow
+		if (uTornadoStrength > 0.05) {
+			vec2 relXZ = p.xz - uTornadoPos.xz;
+			float r = length(relXZ);
+			if (r < 6.4 && ny < 0.72) {
+				float lowerMask = 1.0 - smoothstep(0.28, 0.72, ny);
+				vec2 windDir = normalize(length(uWindOffset) > 0.0001 ? uWindOffset : vec2(-0.6, 0.8));
+				vec2 dirFromCenter = relXZ / max(r, 0.001);
+				float rearAlign = dot(dirFromCenter, -windDir * 0.8 + vec2(windDir.y, -windDir.x) * 0.6);
+				float slotArc = smoothstep(0.28, 0.78, rearAlign);
+				float slotBand = smoothstep(1.8, 3.1, r) * (1.0 - smoothstep(4.2, 6.2, r));
+				d *= 1.0 - slotArc * slotBand * lowerMask * uTornadoStrength * 0.75;
+			}
+		}
+
 		tau += d * edgeFade;
 	}
 
@@ -363,6 +441,9 @@ export interface CloudShaderUniforms {
 	uDarkMode: THREE.IUniform<number>;
 	uFlashIntensity: THREE.IUniform<number>;
 	uFlashPos: THREE.IUniform<THREE.Vector3>;
+	uTornadoPos: THREE.IUniform<THREE.Vector3>;
+	uTornadoStrength: THREE.IUniform<number>;
+	uTornadoPhase: THREE.IUniform<number>;
 }
 
 export interface GroundShadowUniforms {
@@ -377,6 +458,9 @@ export interface GroundShadowUniforms {
 	uDarkMode: THREE.IUniform<number>;
 	uSunElevNorm: THREE.IUniform<number>;
 	uSunShadowStrength: THREE.IUniform<number>;
+	uTornadoPos: THREE.IUniform<THREE.Vector3>;
+	uTornadoStrength: THREE.IUniform<number>;
+	uTornadoPhase: THREE.IUniform<number>;
 }
 
 export function createCloudPointMaterial(
@@ -398,7 +482,10 @@ export function createCloudPointMaterial(
 		uShadowDither: { value: 0.65 },
 		uDarkMode: { value: 0 },
 		uFlashIntensity: { value: 0 },
-		uFlashPos: { value: new THREE.Vector3(0, 4, 0) }
+		uFlashPos: { value: new THREE.Vector3(0, 4, 0) },
+		uTornadoPos: { value: new THREE.Vector3(0, 3.5, 0) },
+		uTornadoStrength: { value: 0 },
+		uTornadoPhase: { value: 0 }
 	};
 
 	const material = new THREE.ShaderMaterial({
@@ -426,7 +513,10 @@ export function createGroundShadowMaterial(
 		uShadowDither: { value: 0.65 },
 		uDarkMode: { value: 0 },
 		uSunElevNorm: { value: 0.7 },
-		uSunShadowStrength: { value: 1.0 }
+		uSunShadowStrength: { value: 1.0 },
+		uTornadoPos: { value: new THREE.Vector3(0, 3.5, 0) },
+		uTornadoStrength: { value: 0 },
+		uTornadoPhase: { value: 0 }
 	};
 
 	const material = new THREE.ShaderMaterial({

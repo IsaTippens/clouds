@@ -6,10 +6,11 @@
 
 import * as THREE from 'three';
 import type { CloudParams } from '$lib/types';
+import type { TornadoStatus } from './tornado';
 import { clamp, createSeededNoise, lerp, smoothstep } from './noise';
 
 export interface WindSystem {
-	update(dt: number, elapsed: number, params: CloudParams): void;
+	update(dt: number, elapsed: number, params: CloudParams, tornado?: TornadoStatus): void;
 	dispose(): void;
 }
 
@@ -339,18 +340,55 @@ export function createWindSystem(scene: THREE.Scene): WindSystem {
 		dirZ: number,
 		turbAmp: number,
 		timeShift: number,
+		tornado: TornadoStatus | undefined,
 		out: [number, number, number]
-	): void {
+	): number {
 		const freq = 0.125;
 		noise.curl3D(x * freq + timeShift, y * freq * 1.15, z * freq - timeShift * 0.7, out);
 		// Combine mean wind vector with divergence-free curl deflection
-		const vx = dirX + out[0] * turbAmp * 0.52;
-		const vy = out[1] * turbAmp * 0.28;
-		const vz = dirZ + out[2] * turbAmp * 0.52;
+		let vx = dirX + out[0] * turbAmp * 0.52;
+		let vy = out[1] * turbAmp * 0.28;
+		let vz = dirZ + out[2] * turbAmp * 0.52;
+		let speedBoost = 1.0;
+
+		// Cyclonic vortex inflow, tangential swirl, and core updraft when a tornado is active
+		if (tornado && tornado.tornadoActive && tornado.funnelStrength > 0.04) {
+			const dx = x - tornado.anchorX;
+			const dz = z - tornado.anchorZ;
+			const r = Math.hypot(dx, dz);
+			const influenceR = 13.0;
+			if (r < influenceR) {
+				const vertMask = 1.0 - smoothstep(tornado.topY + 1.2, tornado.topY + 5.8, y);
+				if (vertMask > 0.01) {
+					const radialFalloff = 1.0 - smoothstep(1.2, influenceR, r);
+					const coreMask = 1.0 - smoothstep(0.6, 5.2, r);
+					const strength = tornado.funnelStrength * vertMask;
+
+					const safeR = Math.max(r, 0.35);
+					const invR = 1.0 / safeR;
+					// Unit inward radial vector and counter-clockwise tangential swirl vector
+					const inX = -dx * invR;
+					const inZ = -dz * invR;
+					const tangX = -dz * invR;
+					const tangZ = dx * invR;
+
+					const swirlAmt = (2.6 * radialFalloff + 2.2 * coreMask) * strength;
+					const suctionAmt = (1.35 * radialFalloff + 0.85 * coreMask) * strength;
+					const updraftAmt = 1.65 * coreMask * strength;
+
+					vx += tangX * swirlAmt + inX * suctionAmt;
+					vz += tangZ * swirlAmt + inZ * suctionAmt;
+					vy += updraftAmt;
+					speedBoost = 1.0 + (radialFalloff * 0.65 + coreMask * 1.35) * strength;
+				}
+			}
+		}
+
 		const invLen = 1 / Math.max(Math.hypot(vx, vy, vz), 1e-4);
 		out[0] = vx * invLen;
 		out[1] = vy * invLen;
 		out[2] = vz * invLen;
+		return speedBoost;
 	}
 
 	function resetHistoryToHead(s: StreamlineState): void {
@@ -379,7 +417,7 @@ export function createWindSystem(scene: THREE.Scene): WindSystem {
 			s.histZ[TRAIL_POINTS - 1] = pz;
 
 			for (let k = TRAIL_POINTS - 2; k >= 0; k--) {
-				evaluateFlow(px, py, pz, dirX, dirZ, turbAmp, 0, curlOut);
+				evaluateFlow(px, py, pz, dirX, dirZ, turbAmp, 0, undefined, curlOut);
 				if (k === TRAIL_POINTS - 2) {
 					s.tangentX = curlOut[0];
 					s.tangentY = curlOut[1];
@@ -411,7 +449,7 @@ export function createWindSystem(scene: THREE.Scene): WindSystem {
 		}
 	}
 
-	function update(dt: number, _elapsed: number, params: CloudParams): void {
+	function update(dt: number, _elapsed: number, params: CloudParams, tornado?: TornadoStatus): void {
 		const isDark = params.surfaceMode === 'dark';
 		const darkVal = isDark ? 1.0 : 0.0;
 		sharedUniforms.uDarkMode.value = darkVal;
@@ -457,51 +495,75 @@ export function createWindSystem(scene: THREE.Scene): WindSystem {
 
 			// Advance ONLY the head along the live 3D flow field; body nodes remain static in world space
 			if (timeStep > 0) {
-				evaluateFlow(s.headX, s.headY, s.headZ, dirX, dirZ, turbAmp, timeShift, curlOut);
+				const vortexBoost = evaluateFlow(
+					s.headX,
+					s.headY,
+					s.headZ,
+					dirX,
+					dirZ,
+					turbAmp,
+					timeShift,
+					tornado,
+					curlOut
+				);
 				s.tangentX = curlOut[0];
 				s.tangentY = curlOut[1];
 				s.tangentZ = curlOut[2];
 
-				const stepDist = advectBase * s.speedFactor * timeStep;
+				const stepDist = advectBase * s.speedFactor * vortexBoost * timeStep;
 				const nextRawX = s.headX + curlOut[0] * stepDist;
 				const nextRawZ = s.headZ + curlOut[2] * stepDist;
 				const nextY = clamp(
 					s.headY +
-						curlOut[1] * stepDist * 0.65 +
-						(s.baseY - s.headY) * Math.min(1, timeStep * 0.8),
+						curlOut[1] * stepDist * 0.78 +
+						(s.baseY - s.headY) * Math.min(1, timeStep * 0.55),
 					MIN_ALT_Y,
 					MAX_ALT_Y
 				);
 
-				const wrappedX = wrapCoord(nextRawX);
-				const wrappedZ = wrapCoord(nextRawZ);
-				const didWrap =
-					Math.abs(wrappedX - nextRawX) > 1.0 || Math.abs(wrappedZ - nextRawZ) > 1.0;
-
-				s.headX = wrappedX;
-				s.headY = nextY;
-				s.headZ = wrappedZ;
-
-				if (didWrap) {
-					// Cleanly re-seed snake at the opposite boundary so it grows out without stretching
-					resetHistoryToHead(s);
-				} else {
-					s.distAccum += stepDist;
-					// Record static breadcrumbs at uniform arc spacing so the tail snakes along the exact path
-					let guard = 0;
-					while (s.distAccum >= spacing && guard < 6) {
-						s.distAccum -= spacing;
-						const backDist = s.distAccum;
-						pushHistoryNode(
-							s,
-							s.headX - s.tangentX * backDist,
-							clamp(s.headY - s.tangentY * backDist * 0.65, 0.35, MAX_ALT_Y + 0.8),
-							s.headZ - s.tangentZ * backDist
-						);
-						guard++;
+				// If sucked tightly into the upper tornado core, gently release back at a fresh upwind edge
+				let didWrap = false;
+				if (tornado && tornado.tornadoActive && tornado.funnelStrength > 0.15) {
+					const distCore = Math.hypot(nextRawX - tornado.anchorX, nextRawZ - tornado.anchorZ);
+					if (distCore < 0.7 && nextY > tornado.topY * 0.88) {
+						s.headX = wrapCoord(tornado.anchorX - dirX * DOMAIN_HALF * 0.92 + (noise.rand() - 0.5) * 14);
+						s.headZ = wrapCoord(tornado.anchorZ - dirZ * DOMAIN_HALF * 0.92 + (noise.rand() - 0.5) * 14);
+						s.headY = s.baseY;
+						resetHistoryToHead(s);
+						didWrap = true;
 					}
-					if (s.distAccum >= spacing) {
-						s.distAccum = 0;
+				}
+
+				if (!didWrap) {
+					const wrappedX = wrapCoord(nextRawX);
+					const wrappedZ = wrapCoord(nextRawZ);
+					didWrap = Math.abs(wrappedX - nextRawX) > 1.0 || Math.abs(wrappedZ - nextRawZ) > 1.0;
+
+					s.headX = wrappedX;
+					s.headY = nextY;
+					s.headZ = wrappedZ;
+
+					if (didWrap) {
+						// Cleanly re-seed snake at the opposite boundary so it grows out without stretching
+						resetHistoryToHead(s);
+					} else {
+						s.distAccum += stepDist;
+						// Record static breadcrumbs at uniform arc spacing so the tail snakes along the exact path
+						let guard = 0;
+						while (s.distAccum >= spacing && guard < 8) {
+							s.distAccum -= spacing;
+							const backDist = s.distAccum;
+							pushHistoryNode(
+								s,
+								s.headX - s.tangentX * backDist,
+								clamp(s.headY - s.tangentY * backDist * 0.65, 0.35, MAX_ALT_Y + 0.8),
+								s.headZ - s.tangentZ * backDist
+							);
+							guard++;
+						}
+						if (s.distAccum >= spacing) {
+							s.distAccum = 0;
+						}
 					}
 				}
 			}

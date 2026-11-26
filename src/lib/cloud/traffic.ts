@@ -13,6 +13,7 @@
 
 import * as THREE from 'three';
 import type { CloudParams, SurfaceMode } from '$lib/types';
+import type { TornadoStatus } from './tornado';
 import { clamp, createPrng, lerp, smoothstep } from './noise';
 
 export interface TrafficStatus {
@@ -26,7 +27,8 @@ export interface AirTrafficSystem {
 		elapsed: number,
 		params: CloudParams,
 		cloudBaseY: number,
-		cloudTopY: number
+		cloudTopY: number,
+		tornado?: TornadoStatus
 	): TrafficStatus;
 	dispose(): void;
 }
@@ -488,7 +490,19 @@ interface TransientPath {
 	behavior: FlightBehavior;
 }
 
-interface PlaneSlot {
+interface TornadoAvoidState {
+	avoidX: number;
+	avoidY: number;
+	avoidZ: number;
+	trapped: boolean;
+	trapAge: number;
+	trapDuration: number;
+	trapAngle: number;
+	trapRadius: number;
+	trapY: number;
+}
+
+interface PlaneSlot extends TornadoAvoidState {
 	active: boolean;
 	mesh: THREE.Group;
 	leftEngineLocal: THREE.Vector3;
@@ -501,7 +515,7 @@ interface PlaneSlot {
 	pos: THREE.Vector3;
 }
 
-interface HeliSlot {
+interface HeliSlot extends TornadoAvoidState {
 	active: boolean;
 	mesh: THREE.Group;
 	mainRotor: THREE.Group;
@@ -523,7 +537,7 @@ interface FlockBirdMember {
 	altPhase: number;
 }
 
-interface BirdFlockSlot {
+interface BirdFlockSlot extends TornadoAvoidState {
 	active: boolean;
 	path: TransientPath | null;
 	birdCount: number;
@@ -716,7 +730,16 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 			contrailBaseIdx: idx * CONTRAIL_PER_PLANE,
 			contrailHead: 0,
 			bobPhase: prng() * Math.PI * 2,
-			pos: new THREE.Vector3()
+			pos: new THREE.Vector3(),
+			avoidX: 0,
+			avoidY: 0,
+			avoidZ: 0,
+			trapped: false,
+			trapAge: 0,
+			trapDuration: 2.6,
+			trapAngle: 0,
+			trapRadius: 3.0,
+			trapY: 10.0
 		};
 	});
 
@@ -811,7 +834,16 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 			strobeMat,
 			path: null,
 			strobeOffset: idx * 0.33,
-			bobPhase: prng() * Math.PI * 2
+			bobPhase: prng() * Math.PI * 2,
+			avoidX: 0,
+			avoidY: 0,
+			avoidZ: 0,
+			trapped: false,
+			trapAge: 0,
+			trapDuration: 2.5,
+			trapAngle: 0,
+			trapRadius: 3.0,
+			trapY: 3.0
 		};
 	});
 
@@ -859,7 +891,16 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 		path: null,
 		birdCount: 0,
 		formation: 'v-formation',
-		members: []
+		members: [],
+		avoidX: 0,
+		avoidY: 0,
+		avoidZ: 0,
+		trapped: false,
+		trapAge: 0,
+		trapDuration: 2.4,
+		trapAngle: 0,
+		trapRadius: 3.0,
+		trapY: 3.0
 	}));
 
 	// 6 triangles per bird = 18 vertices per bird
@@ -1039,6 +1080,134 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 		return 'small-orbit';
 	}
 
+	function resetTornadoState(state: TornadoAvoidState): void {
+		state.avoidX = 0;
+		state.avoidY = 0;
+		state.avoidZ = 0;
+		state.trapped = false;
+		state.trapAge = 0;
+		state.trapDuration = 2.4;
+		state.trapAngle = 0;
+		state.trapRadius = 3.0;
+		state.trapY = 3.0;
+	}
+
+	/**
+	 * Evaluate tornado avoidance steering OR inner vortex capture + spiral drag-in.
+	 * Returns:
+	 *  - 'ok': entity continues normally (with smooth avoidance offset applied to p0/pPrev/pNext)
+	 *  - 'trapped': entity is spiraling into the tornado core (p0/pPrev/pNext overwritten with spiral)
+	 *  - 'despawn': entity was dragged completely into the vortex and should despawn now
+	 */
+	function stepTornadoInteraction(
+		state: TornadoAvoidState,
+		pos: THREE.Vector3,
+		prev: THREE.Vector3,
+		next: THREE.Vector3,
+		simDt: number,
+		tornado: TornadoStatus | undefined,
+		avoidRadius: number,
+		captureRadius: number,
+		maxHazardHeight: number,
+		evadeStrength: number
+	): { mode: 'ok' | 'trapped' | 'despawn'; scaleFade: number } {
+		const hasTornado = Boolean(tornado && tornado.tornadoActive && tornado.funnelStrength > 0.12);
+
+		if (state.trapped) {
+			if (!hasTornado || !tornado) {
+				// Tornado dissipated before consuming entity — despawn cleanly
+				return { mode: 'despawn', scaleFade: 0 };
+			}
+			state.trapAge += simDt;
+			const frac = clamp(state.trapAge / state.trapDuration, 0, 1);
+			if (frac >= 1.0) {
+				return { mode: 'despawn', scaleFade: 0 };
+			}
+
+			// Tightening accelerating cyclonic spiral pulled inward & upward into the funnel core
+			const targetR = lerp(state.trapRadius, 0.28, clamp(simDt * 1.35, 0, 1));
+			state.trapRadius = Math.max(0.24, targetR);
+			const angularSpeed = (3.4 + (3.2 / Math.max(state.trapRadius, 0.45))) * (0.65 + tornado.funnelStrength * 0.55);
+			state.trapAngle += angularSpeed * simDt;
+			state.trapY = lerp(state.trapY, tornado.topY + 0.85, clamp(simDt * 0.85, 0, 1));
+
+			const evalSpiral = (aOff: number, rOff: number, yOff: number, out: THREE.Vector3) => {
+				const a = state.trapAngle + aOff;
+				const r = Math.max(0.18, state.trapRadius + rOff);
+				out.set(
+					tornado.anchorX + Math.cos(a) * r,
+					Math.max(0.45, state.trapY + yOff),
+					tornado.anchorZ + Math.sin(a) * r
+				);
+			};
+			const dA = angularSpeed * 0.04;
+			evalSpiral(0, 0, 0, pos);
+			evalSpiral(-dA, 0.08, -0.06, prev);
+			evalSpiral(dA, -0.08, 0.06, next);
+
+			const fade = 1.0 - smoothstep(0.68, 1.0, frac);
+			return { mode: 'trapped', scaleFade: fade };
+		}
+
+		// Apply existing smooth avoidance offset before checking distance
+		const curX = pos.x + state.avoidX;
+		const curY = pos.y + state.avoidY;
+		const curZ = pos.z + state.avoidZ;
+
+		let targetAvoidX = 0;
+		let targetAvoidY = 0;
+		let targetAvoidZ = 0;
+
+		if (hasTornado && tornado && curY <= maxHazardHeight) {
+			const dx = curX - tornado.anchorX;
+			const dz = curZ - tornado.anchorZ;
+			const dist = Math.hypot(dx, dz);
+
+			// Inner capture zone: caught by vortex suction!
+			if (dist < captureRadius && tornado.funnelStrength > 0.32) {
+				state.trapped = true;
+				state.trapAge = 0;
+				state.trapDuration = 2.1 + prng() * 0.9;
+				state.trapAngle = Math.atan2(dz, dx);
+				state.trapRadius = Math.max(0.6, dist);
+				state.trapY = curY;
+				return { mode: 'trapped', scaleFade: 1 };
+			}
+
+			// Outer avoidance zone: actively steer laterally & climb away from funnel path
+			if (dist < avoidRadius) {
+				const proximity = 1.0 - smoothstep(captureRadius * 0.9, avoidRadius, dist);
+				const safeD = Math.max(dist, 0.4);
+				const awayX = dx / safeD;
+				const awayZ = dz / safeD;
+				// Add a subtle tangential bias so entities bank smoothly around the tornado rather than stalling
+				const tangX = -awayZ;
+				const tangZ = awayX;
+				const push = proximity * evadeStrength * tornado.funnelStrength;
+				targetAvoidX = (awayX * 0.82 + tangX * 0.58) * push;
+				targetAvoidZ = (awayZ * 0.82 + tangZ * 0.58) * push;
+				targetAvoidY = proximity * 1.45 * tornado.funnelStrength;
+			}
+		}
+
+		const blend = clamp(simDt * 2.2, 0, 1);
+		state.avoidX = lerp(state.avoidX, targetAvoidX, blend);
+		state.avoidY = lerp(state.avoidY, targetAvoidY, blend);
+		state.avoidZ = lerp(state.avoidZ, targetAvoidZ, blend);
+
+		pos.x += state.avoidX;
+		pos.y += state.avoidY;
+		pos.z += state.avoidZ;
+		prev.x += state.avoidX;
+		prev.y += state.avoidY;
+		prev.z += state.avoidZ;
+		next.x += state.avoidX;
+		next.y += state.avoidY;
+		next.z += state.avoidZ;
+
+		return { mode: 'ok', scaleFade: 1 };
+	}
+
 	function spawnEntity(
 		kind: EntityKind,
 		cloudBaseY: number,
@@ -1059,6 +1228,7 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 			slot.path = path;
 			slot.emitAccum = 0;
 			slot.mesh.visible = true;
+			resetTornadoState(slot);
 			return true;
 		}
 
@@ -1075,6 +1245,7 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 			slot.active = true;
 			slot.path = path;
 			slot.mesh.visible = true;
+			resetTornadoState(slot);
 			return true;
 		}
 
@@ -1103,6 +1274,7 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 		slot.formation = formation;
 		slot.birdCount = count;
 		slot.members = buildFlockMembers(formation, count);
+		resetTornadoState(slot);
 		return true;
 	}
 
@@ -1125,7 +1297,8 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 		_elapsed: number,
 		params: CloudParams,
 		cloudBaseY: number,
-		cloudTopY: number
+		cloudTopY: number,
+		tornado?: TornadoStatus
 	): TrafficStatus {
 		applySurfaceMode(params.surfaceMode);
 
@@ -1240,16 +1413,48 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 			_pPrev.y += bobY;
 			_pNext.y += bobY;
 
-			// Smooth horizon emergence & distant fade-out
-			const edgeFade = smoothstep(0.0, 0.07, u) * (1.0 - smoothstep(0.93, 1.0, u));
+			// Tornado avoidance / vortex capture (planes try to skirt around storm columns; lower ones can get pulled in)
+			const tRes = stepTornadoInteraction(
+				slot,
+				_p0,
+				_pPrev,
+				_pNext,
+				simDt,
+				tornado,
+				11.0,
+				3.4,
+				(tornado?.topY ?? 5.0) + 9.5,
+				4.8
+			);
+			if (tRes.mode === 'despawn') {
+				slot.active = false;
+				slot.path = null;
+				slot.mesh.visible = false;
+				clearPlaneOverlaySlot(p);
+				continue;
+			}
+
+			// Smooth horizon emergence & distant / vortex fade-out
+			const edgeFade =
+				smoothstep(0.0, 0.07, u) * (1.0 - smoothstep(0.93, 1.0, u)) * tRes.scaleFade;
 			slot.mesh.visible = edgeFade > 0.01;
 			slot.mesh.scale.setScalar(Math.max(0.01, edgeFade));
 
-			orientAircraft(slot.mesh, _p0, _pPrev, _pNext, Math.max(0.02, dtSpan), 0.22, 0.44, 0);
+			const bankMax = tRes.mode === 'trapped' ? 1.15 : 0.44;
+			orientAircraft(
+				slot.mesh,
+				_p0,
+				_pPrev,
+				_pNext,
+				Math.max(0.02, tRes.mode === 'trapped' ? 0.04 : dtSpan),
+				tRes.mode === 'trapped' ? 0.38 : 0.22,
+				bankMax,
+				tRes.mode === 'trapped' ? Math.sin(simTime * 7.0) * 0.35 : 0
+			);
 			slot.pos.copy(_p0);
 
-			// Emit contrail particles along twin engines while inside visible sky
-			if (simDt > 0 && edgeFade > 0.35) {
+			// Emit contrail particles along twin engines while inside visible sky & not trapped
+			if (simDt > 0 && edgeFade > 0.35 && tRes.mode !== 'trapped') {
 				slot.mesh.updateMatrixWorld(true);
 				slot.emitAccum += simDt;
 				while (slot.emitAccum >= CONTRAIL_EMIT_INTERVAL) {
@@ -1398,12 +1603,42 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 			_pPrev.y += bob;
 			_pNext.y += bob;
 
-			const edgeFade = smoothstep(0.0, 0.07, u) * (1.0 - smoothstep(0.93, 1.0, u));
+			// Tornado avoidance / vortex capture for low-flying helicopters
+			const tRes = stepTornadoInteraction(
+				slot,
+				_p0,
+				_pPrev,
+				_pNext,
+				simDt,
+				tornado,
+				10.5,
+				3.9,
+				(tornado?.topY ?? 5.0) + 4.0,
+				5.2
+			);
+			if (tRes.mode === 'despawn') {
+				slot.active = false;
+				slot.path = null;
+				slot.mesh.visible = false;
+				continue;
+			}
+
+			const edgeFade =
+				smoothstep(0.0, 0.07, u) * (1.0 - smoothstep(0.93, 1.0, u)) * tRes.scaleFade;
 			slot.mesh.visible = edgeFade > 0.01;
 			slot.mesh.scale.setScalar(Math.max(0.01, edgeFade));
 
-			// Pitch slightly forward (+0.14 rad around local +X tilts +Z nose downward)
-			orientAircraft(slot.mesh, _p0, _pPrev, _pNext, Math.max(0.02, dtSpan), 0.18, 0.28, 0.14);
+			// Pitch slightly forward (+0.14 rad around local +X tilts +Z nose downward); tumble if trapped
+			orientAircraft(
+				slot.mesh,
+				_p0,
+				_pPrev,
+				_pNext,
+				Math.max(0.02, tRes.mode === 'trapped' ? 0.04 : dtSpan),
+				tRes.mode === 'trapped' ? 0.42 : 0.18,
+				tRes.mode === 'trapped' ? 1.1 : 0.28,
+				tRes.mode === 'trapped' ? Math.sin(simTime * 9.0) * 0.45 : 0.14
+			);
 
 			if (simDt > 0) {
 				slot.mainRotor.rotation.y += simDt * 24.0;
@@ -1434,7 +1669,6 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 				continue;
 			}
 
-			const edgeFade = smoothstep(0.0, 0.07, u) * (1.0 - smoothstep(0.93, 1.0, u));
 			const uPrev = Math.max(0, u - pathEps);
 			const uNext = Math.min(1, u + pathEps);
 			const dtSpan = Math.max(0.02, (uNext - uPrev) * 0.5 * flock.path.duration);
@@ -1442,6 +1676,30 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 			flock.path.curve.getPoint(u, _vel); // store lead center in _vel
 			flock.path.curve.getPoint(uPrev, _pPrev);
 			flock.path.curve.getPoint(uNext, _pNext);
+
+			// Tornado avoidance / vortex capture for bird flocks
+			const tRes = stepTornadoInteraction(
+				flock,
+				_vel,
+				_pPrev,
+				_pNext,
+				simDt,
+				tornado,
+				9.5,
+				4.0,
+				(tornado?.topY ?? 5.0) + 3.0,
+				4.8
+			);
+			if (tRes.mode === 'despawn') {
+				flock.active = false;
+				flock.path = null;
+				flock.birdCount = 0;
+				continue;
+			}
+
+			const edgeFade =
+				smoothstep(0.0, 0.07, u) * (1.0 - smoothstep(0.93, 1.0, u)) * tRes.scaleFade;
+			const spanForAcc = tRes.mode === 'trapped' ? 0.04 : dtSpan;
 
 			_fwd.subVectors(_pNext, _pPrev).normalize();
 			_right.crossVectors(_worldUp, _fwd);
@@ -1456,7 +1714,7 @@ export function createAirTrafficSystem(scene: THREE.Scene): AirTrafficSystem {
 				.copy(_pNext)
 				.add(_pPrev)
 				.addScaledVector(_vel, -2.0)
-				.multiplyScalar(1.0 / (dtSpan * dtSpan));
+				.multiplyScalar(1.0 / (spanForAcc * spanForAcc));
 
 			const latAcc = _acc.dot(_right);
 			const bank = clamp(-latAcc * 0.25, -0.56, 0.56);

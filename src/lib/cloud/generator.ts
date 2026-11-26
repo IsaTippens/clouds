@@ -90,8 +90,10 @@ function hash2D(ix: number, iz: number, seed: number): number {
  */
 function computeVolumeBounds(params: CloudParams, meteo: MeteorologyState): CloudVolumeBounds {
 	const w = meteo.weights;
+	// Map base altitude (0.35..11.2 km) into a well-framed world Y range (3.2..7.8)
+	// so storm bases sit clearly above the ground with room for rain curtains and full tornado funnels.
 	const altNorm = clamp((meteo.baseAltitudeKm - 0.35) / 10.5, 0, 1);
-	const baseY = lerp(2.1, 7.6, Math.pow(altNorm, 0.85));
+	const baseY = lerp(3.2, 7.8, Math.pow(altNorm, 0.85));
 
 	const hCumulus = 4.2 + params.turbulence * 1.5;
 	const hStratus = 1.35 + params.humidity * 0.45;
